@@ -111,7 +111,10 @@ test_approx(std::vector<float> &queries, size_t qsize, hnswlib::HierarchicalNSW<
     size_t total = 0;
 
     for (int i = 0; i < qsize; i++) {
-        std::priority_queue<std::pair<d_type, hnswlib::labeltype>> result = appr_alg.searchKnn((char *)(queries.data() + vecdim * i), K);
+      std::priority_queue<std::pair<d_type, hnswlib::labeltype>> result;
+      for(int j=0;j<100000;j++){
+         result = appr_alg.searchKnn((char *)(queries.data() + vecdim * i), K);
+      }
         total += K;
         while (result.size()) {
             if (answers[i].find(result.top().second) != answers[i].end()) {
@@ -177,6 +180,8 @@ int main(int argc, char **argv) {
     int M = 16;
     int efConstruction = 200;
     int num_threads = std::thread::hardware_concurrency();
+
+    printf("Threads num:%d\n",num_threads);
 
     bool update = false;
 

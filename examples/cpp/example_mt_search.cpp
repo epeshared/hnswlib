@@ -62,7 +62,7 @@ inline void ParallelFor(size_t start, size_t end, size_t numThreads, Function fn
 
 int main() {
     int dim = 16;               // Dimension of the elements
-    int max_elements = 10000;   // Maximum number of elements, should be known beforehand
+    int max_elements = 10000000;   // Maximum number of elements, should be known beforehand
     int M = 16;                 // Tightly connected with internal dimensionality of the data
                                 // strongly affects the memory consumption
     int ef_construction = 200;  // Controls index search speed/build speed tradeoff

@@ -4,8 +4,8 @@ typedef unsigned int docidtype;
 typedef float dist_t;
 
 int main() {
-    int dim = 16;               // Dimension of the elements
-    int max_elements = 10000;   // Maximum number of elements, should be known beforehand
+    int dim = 128;               // Dimension of the elements
+    int max_elements = 100000;   // Maximum number of elements, should be known beforehand
     int M = 16;                 // Tightly connected with internal dimensionality of the data
                                 // strongly affects the memory consumption
     int ef_construction = 200;  // Controls index search speed/build speed tradeoff

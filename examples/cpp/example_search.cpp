@@ -19,6 +19,7 @@ int main() {
     float* data = new float[dim * max_elements];
     for (int i = 0; i < dim * max_elements; i++) {
         data[i] = distrib_real(rng);
+        printf("%f ",data[i]);
     }
 
     // Add data to index
