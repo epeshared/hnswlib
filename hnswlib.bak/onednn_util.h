@@ -334,72 +334,6 @@ static int32_t vector_dot_product_int32_t(const void* a, const void* b, const vo
     else if(final_result<-128) final_result=-128;   */
     return final_result;
 }
-#if 1
-float amx_inner_product_matrix_int8( int8_t **libraryMatrix, int8_t *queryMatrix, uint64_t dims,uint64_t batchSizeA,
-                              uint64_t batchSizeB, int32_t *results){
-  int DIM=64;
-  int blockCount=(dims)/DIM;
-  int tailCount=dims%DIM;
-  thread_local unsigned char *maInt8=NULL;
-  thread_local bool init_mem=false;
-  thread_local char cfg[64]={0};
-  
-/*   int32_t *result;
-  result=re */
-
-/*   cfg[0]=1;
-  cfg[16]=DIM;
-  cfg[48] = batchSizeA;  // row->M batchsizeA(16) *DIM(64)  X  DIM(64)*batchsizeB(1) 
-  // matrix B need a layout rearragement
-  cfg[16+1*2] = batchSizeB*2*2;   // col = N*4
-  cfg[48+1]   = DIM/4;   // row = K/4
-
-  cfg[16+2*2] = (batchSizeB*4); // N*sizeof(int32)
-  cfg[48+2] = batchSizeA;  */
-
-
-  if(!init_mem){
-    if(maInt8) free(maInt8);
-    maInt8 = (unsigned char*) aligned_alloc (64,sizeof(char)*DIM*16);
-    cfg[0]=1;
-    cfg[16]=DIM;
-    cfg[48] = 16;  // row->M batchsizeA(16) *DIM(64)  X  DIM(64)*batchsizeB(1) 
-    // matrix B need a layout rearragement
-    cfg[16+1*2] = batchSizeB*2*2;   // col = N*4
-    cfg[48+1]   = DIM/4;   // row = K/4
-
-    cfg[16+2*2] = (batchSizeB*4); // N*sizeof(int32)
-    cfg[48+2] = 16;  
-
-    _tile_loadconfig((void*)cfg); 
-    init_mem=true;
-  }
-  
-  memset(maInt8,0,16*DIM); 
-
-  for(int i=0;i<blockCount;i++){
-
-    int32_t stride=i*DIM;
-    __m512i sa;
-    for(int j=0;j<batchSizeA;j++){  
-      sa=_mm512_load_si512(libraryMatrix[j]+stride);
-      _mm512_store_si512(maInt8+j*DIM,sa);
-    } 
-    amx_int8_mul((u64*) cfg, maInt8,queryMatrix+stride,DIM,batchSizeB*4,(void*)results);
-  }
-  _tile_stored(2,results,batchSizeB*4);
-  _tile_zero(2);
-
-  if(tailCount!=0){
-    for(int k=0;k<batchSizeA;k++){
-      for(int l=0;l<batchSizeB;l++){
-        results[k*batchSizeB+l]+=vector_dot_product_int32_t(libraryMatrix[k]+DIM*blockCount,queryMatrix+l*dims+DIM*blockCount,&tailCount);
-      }
-    }
-  }
-  return 0;
-}
-#else 
 
 float amx_inner_product_matrix_int8( int8_t **libraryMatrix, int8_t *queryMatrix, uint64_t dims,uint64_t batchSizeA,
                               uint64_t batchSizeB, int32_t *results){
@@ -407,7 +341,7 @@ float amx_inner_product_matrix_int8( int8_t **libraryMatrix, int8_t *queryMatrix
   int blockCount=(dims)/DIM;
   int tailCount=dims%DIM;
   thread_local unsigned char *maInt8=NULL;
- // thread_local unsigned char *mbInt8=NULL,*mbTemp=NULL;
+  thread_local unsigned char *mbInt8=NULL,*mbTemp=NULL;
   thread_local bool init_mem=false;
 
   thread_local int preBatchSizeA =0;
@@ -433,6 +367,13 @@ float amx_inner_product_matrix_int8( int8_t **libraryMatrix, int8_t *queryMatrix
   if(!init_mem){
     if(maInt8) free(maInt8);
     maInt8 = (unsigned char*) aligned_alloc (64,sizeof(char)*DIM*16);
+    preBatchSizeA=batchSizeA;
+    if(mbInt8) free(mbInt8);
+    if(mbTemp) free(mbTemp);
+    mbInt8 = (unsigned char*) aligned_alloc (64,sizeof(char)*DIM*16);
+    mbTemp = (unsigned char*) aligned_alloc (64,sizeof(char)*DIM*16);
+
+    preBatchSizeB=batchSizeB;
      
     cfg[0]=1;
     cfg[16]=DIM;
@@ -440,18 +381,6 @@ float amx_inner_product_matrix_int8( int8_t **libraryMatrix, int8_t *queryMatrix
     // matrix B need a layout rearragement
     cfg[16+1*2] = batchSizeB*2*2;   // col = N*4
     cfg[48+1]   = DIM/4;   // row = K/4
-
-    cfg[22]=DIM;
-    cfg[51] = 16;  // row->M
-    // matrix B need a layout rearragement
-    cfg[24] = batchSizeB*2*2;   // col = N*4
-    cfg[52]   = DIM/4;   // row = K/4
-
-    cfg[26]=DIM;
-    cfg[53] = 16;  // row->M
-    // matrix B need a layout rearragement
-    cfg[28] = batchSizeB*2*2;   // col = N*4
-    cfg[54]   = DIM/4;
 
     cfg[16+2*2] = (batchSizeB*4); // N*sizeof(int32)
     cfg[48+2] = 16;  
@@ -461,94 +390,60 @@ float amx_inner_product_matrix_int8( int8_t **libraryMatrix, int8_t *queryMatrix
   }
 
   memset(maInt8,0,16*DIM); 
-  int i;
 
-  for(int j=0;j<batchSizeA;j++){  
-      _mm_prefetch((char *) (libraryMatrix[j]), _MM_HINT_T1);
-  } 
-  for(i=0;i<blockCount/3;i++){
+  for(int i=0;i<blockCount;i++){
+    int32_t stride=i*DIM;
     __m512i sa;
+    //#pragma omp parallel for
     for(int j=0;j<batchSizeA;j++){  
-      //_mm_prefetch((char *) (libraryMatrix[j]+(3*(i+1))*DIM), _MM_HINT_T0);
-      sa=_mm512_load_si512(libraryMatrix[j] + 3 * i * DIM);
+      sa=_mm512_loadu_si512(libraryMatrix[j]+stride);
       _mm512_store_si512(maInt8+j*DIM,sa);
+
+      //_mm_prefetch((char *) (libraryMatrix[j+1]+stride), _MM_HINT_T0);
+
+      //memcpy(maInt8+j*DIM, libraryMatrix[j]+i*DIM,sizeof(char)*DIM);
     } 
-    _tile_loadd(0,maInt8, 64);
-    _tile_loadd(1,queryMatrix + 3 * i * DIM , 4);
-    for(int j=0;j<batchSizeA;j++){  
-      sa=_mm512_load_si512(libraryMatrix[j]+(3 * i + 1) * DIM);
-      _mm512_store_si512(maInt8+j*DIM,sa);
-    } 
-    _tile_loadd(3,maInt8, 64);
-    _tile_loadd(4,queryMatrix + ( 3 * i + 1) * DIM , 4);  
+/*      __m512i sa=_mm512_loadu_epi64(libraryMatrix[batchSizeA-1]+stride);
+    _mm512_store_epi64(maInt8+(batchSizeA-1)*DIM,sa);  */
+/*     for(int j=0;j<batchSizeB;j++){
+      __m512i sb=_mm512_loadu_si512(queryMatrix+j*dims+stride);
+      _mm512_store_si512(mbInt8+j*DIM,sb);
+      //memcpy(mbInt8+j*DIM, queryMatrix+j*dims+i*DIM,sizeof(char)*DIM);
+    } */
+    
+    int KPACK=4/sizeof(int8_t);
 
-    for(int j=0;j<batchSizeA;j++){  
-      sa=_mm512_load_si512(libraryMatrix[j]+ (3 * i + 2) * DIM);
-      _mm512_store_si512(maInt8+j*DIM,sa);
-    } 
-    _tile_loadd(5,maInt8, 64);
-    _tile_loadd(6,queryMatrix + (3 * i + 2) * DIM , 4);
-
-
-    _tile_dpbuud(2,0,1);
-    _tile_dpbuud(2,3,4);
-    _tile_dpbuud(2,5,6);
-  }
-
-  switch(blockCount%3){
-    case 0: break;
-    case 1: 
-      for(int j = 0; j < batchSizeA; j++) {
-          __m512i data = _mm512_load_si512(libraryMatrix[j] + 3 * i * DIM);
-          _mm512_store_si512(maInt8 + j * DIM , data);
-      }
-      _tile_loadd(0,maInt8, 64);
-      _tile_loadd(1,queryMatrix + 3 * i * DIM , 4); 
-      _tile_dpbuud(2,0,1);  
-      break;
-
-    case 2:         
-      for(int j = 0; j < batchSizeA; j++) {
-          __m512i data = _mm512_load_si512(libraryMatrix[j] + 3 * i * DIM);
-          _mm512_store_si512(maInt8 + j * DIM , data);
-      }
-      _tile_loadd(0,maInt8, 64);
-      _tile_loadd(1,queryMatrix + 3* i * DIM , 4);
-      for(int j = 0; j < batchSizeA; j++) {
-          __m512i data = _mm512_load_si512(libraryMatrix[j] + ( 3 * i + 1 ) * DIM);
-          _mm512_store_si512(maInt8 + j * DIM , data);
-      }
-      _tile_loadd(3,maInt8, 64);
-      _tile_loadd(4,queryMatrix + (3 * i + 1 ) * DIM , 4);
-      _tile_dpbuud(2,0,1);
-      _tile_dpbuud(2,3,4);
-      break;
-  }
 /*     for (int k = 0; k < DIM; k++) {
       for (int j = 0; j < batchSizeB; j++) {        
           *((int8_t*)(mbTemp+(k/KPACK*batchSizeB*KPACK+j*KPACK+k%KPACK))) = *((int8_t*)(mbInt8+(j*DIM+k)));
           //std::cout<<    *((u16*)(mbInt8+2*(k*batchSizeB+j))) << "     ";
       }
     }  */
-    // /amx_int8_mul((u64*) cfg, maInt8,queryMatrix+stride,DIM,batchSizeB*4,(void*)results);
-
-
+    //amx_int8_mul((u64*) cfg, mbInt8,mbTemp,DIM,batchSizeB*2*2,(uint8_t*)result);
+    amx_int8_mul((u64*) cfg, maInt8,queryMatrix+stride,DIM,batchSizeB*4,(void*)results);
+  }
   _tile_stored(2,results,batchSizeB*4);
   _tile_zero(2);
-
+/*   for(int j=0;j<batchSizeA*batchSizeB;j++){
+        //printf("cfg : %lld ,batchsizea : %d id :%d %d\n",(uint64_t*)cfg[2], batchSizeA,j,result[j]);
+      results[j]+=result[j];
+  }  */
   if(tailCount!=0){
     for(int k=0;k<batchSizeA;k++){
       for(int l=0;l<batchSizeB;l++){
         results[k*batchSizeB+l]+=vector_dot_product_int32_t(libraryMatrix[k]+DIM*blockCount,queryMatrix+l*dims+DIM*blockCount,&tailCount);
+        /* for(int i=0;i<tailCount;i++){
+          results[k*batchSizeB+l]+=libraryMatrix[k][DIM*blockCount+i]*queryMatrix[l*dims+DIM*blockCount+i];
+        } */
       }
     }
   }
   return 0;
 }
-#endif
 
 
-float devided_batch_amx_inner_product_int8(int8_t **libraryMatrix, int8_t **queryMatrix,uint64_t dims,uint64_t nSize,uint64_t mSize,int32_t* results_amx){
+
+float devided_batch_amx_inner_product(int8_t **libraryMatrix, int8_t **queryMatrix,uint64_t dims,uint64_t nSize,uint64_t mSize,int32_t* results_amx){
   int batchSizeA=16,batchSizeB=16;
   int batchCountA= (nSize-1)/batchSizeA+1;
   int batchCountB= (mSize-1)/batchSizeB+1;
@@ -575,302 +470,6 @@ float devided_batch_amx_inner_product_int8(int8_t **libraryMatrix, int8_t **quer
   return 0;
 }
 
-float amx_inner_product_matrix_bf16( char **floatLibraryMatrix, char  *floatQueryMatrix, uint64_t dims,uint64_t batchSizeA,
-                              uint64_t batchSizeB, float *results){
-    int DIM=32;
-    int blockCount=(dims)/DIM;
-    int tailCount=dims%DIM;
-    thread_local unsigned char *maBf16=NULL;
-    thread_local unsigned char *mbBf16=NULL,*mbTemp=NULL;
- 
-    thread_local int preBatchSizeA =0;
-    thread_local int preBatchSizeB =0;
- 
-    thread_local char cfg[64]={0};
-    //thread_local float result[256]={0};
- 
-    thread_local bool init_mem=false;
- 
-    if(!init_mem){
-        cfg[0]=1;
-        cfg[16]=DIM*2;
-        cfg[48] = 16;  // row->M
-        // matrix B need a layout rearragement
-        cfg[16+1*2] = batchSizeB*2*2;   // col = N*4
-        cfg[48+1]   = DIM/2;   // row = K/4
- 
-        cfg[22]=DIM*2;
-        cfg[51] = 16;  // row->M
-        // matrix B need a layout rearragement
-        cfg[24] = batchSizeB*2*2;   // col = N*4
-        cfg[52]   = DIM/2;   // row = K/4
- 
-        cfg[26]=DIM*2;
-        cfg[53] = 16;  // row->M
-        // matrix B need a layout rearragement
-        cfg[28] = batchSizeB*2*2;   // col = N*4
-        cfg[54]   = DIM/2;   // row = K/4
- 
-        cfg[16+2*2] = (batchSizeB*4); // N*sizeof(int32)
-        cfg[48+2] = 16;
- 
-        if(mbBf16) free(mbBf16);
-        if(mbTemp) free(mbTemp);
-        mbBf16 = (unsigned char*) aligned_alloc (64,sizeof(char)*DIM*batchSizeB*2);
-        mbTemp = (unsigned char*) aligned_alloc (64,sizeof(char)*DIM*batchSizeB*2);
- 
-        if(maBf16) free(maBf16);
-        maBf16 = (unsigned char*) aligned_alloc (64,sizeof(char)*DIM*16*2);
-        preBatchSizeB=batchSizeB;
-        init_mem = true;
- 
-        _tile_loadconfig((void *)cfg);
-    }
-    __m512i high_bits;
-    __m512i low_bits;
-    __m512i all_bits;
-    //memset(maBf16,0,16*DIM*2);
- 
-    int i=0;
-/*     for( i = 0; i < blockCount; i+=1) {
-      for(int j = 0; j < batchSizeA; j++) {
-          high_bits = _mm512_loadu_si512(floatLibraryMatrix[j] +  i * DIM * 2);
-          _mm512_storeu_si512(maBf16 + j * DIM * 2 , high_bits);
-      }
-      high_bits =_mm512_loadu_si512(floatQueryMatrix +  i * DIM * 2);
-      _mm512_storeu_si512(mbBf16 , high_bits);
-      _tile_loadd(0,maBf16, 64);
-      _tile_loadd(1,mbBf16, 4);
-      _tile_dpbf16ps(2,0,1);
-
-    } */
-
-     for( i = 0; i < blockCount/3; i+=1) {
-        for(int j = 0; j < batchSizeA; j++) {
-            __m512i data = _mm512_loadu_si512(floatLibraryMatrix[j]+ 3 * i * DIM * 2);
-            _mm512_storeu_si512(maBf16 + j * DIM * 2, data);
-        }
-        _tile_loadd(0,maBf16, 64);
-        _tile_loadd(1,floatQueryMatrix + 3*i * DIM * 2, 4);
-        for(int j = 0; j < batchSizeA; j++) {
-            __m512i data = _mm512_loadu_si512(floatLibraryMatrix[j] + (3 * i + 1) * DIM * 2);
-            _mm512_storeu_si512(maBf16 + j * DIM * 2, data);
-        }
-        _tile_loadd(3,maBf16, 64);
-        _tile_loadd(4,floatQueryMatrix + (3 * i + 1) * DIM * 2, 4);
-        for(int j = 0; j < batchSizeA; j++) {
-            __m512i data = _mm512_loadu_si512(floatLibraryMatrix[j] + (3 * i + 2) * DIM * 2);
-            _mm512_storeu_si512(maBf16 + j * DIM * 2, data);
-        }
-        _tile_loadd(5,maBf16, 64);
-        _tile_loadd(6,floatQueryMatrix + (3 * i + 2) * DIM * 2, 4);
-
-        _tile_dpbf16ps(2,0,1);  
-        _tile_dpbf16ps(2,3,4);
-        _tile_dpbf16ps(2,5,6);
-    }
-    switch(blockCount%3){
-      case 0: break;
-      case 1:
-        for(int j = 0; j < batchSizeA; j++) {
-            __m512i data = _mm512_loadu_si512(floatLibraryMatrix[j] + 3 * i * DIM * 2);
-            _mm512_storeu_si512(maBf16 + j * DIM * 2, data);
-        }
-        _tile_loadd(0,maBf16, 64);
-        _tile_loadd(1,floatQueryMatrix + 3* i * DIM * 2, 4);
-        _tile_dpbf16ps(2,0,1);  
-        break;
- 
-      case 2:        
-        for(int j = 0; j < batchSizeA; j++) {
-            __m512i data = _mm512_loadu_si512(floatLibraryMatrix[j] + 3 * i * DIM * 2);
-            _mm512_storeu_si512(maBf16 + j * DIM * 2, data);
-        }
-        _tile_loadd(0,maBf16, 64);
-        _tile_loadd(1,floatQueryMatrix + 3* i * DIM * 2, 4);
-        for(int j = 0; j < batchSizeA; j++) {
-            __m512i data = _mm512_loadu_si512(floatLibraryMatrix[j] + (3 * i + 1) * DIM * 2);
-            _mm512_storeu_si512(maBf16 + j * DIM * 2, data);
-        }
-        _tile_loadd(3,maBf16, 64);
-        _tile_loadd(4,floatQueryMatrix + (3 * i + 1) * DIM * 2, 4);
-        _tile_dpbf16ps(2,0,1);  
-        _tile_dpbf16ps(2,3,4);
-        break;
-    }
-/*     for( i = 0; i < blockCount; i+=1) {
-      for(int j = 0; j < batchSizeA; j++) {
-          high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatLibraryMatrix[j] +  i * DIM * 4),16);
-          low_bits = _mm512_loadu_si512(floatLibraryMatrix[j] +  i * DIM * 4 + 64);
-          all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
-          _mm512_storeu_si512(maBf16 + j * DIM * 2 , all_bits);
-      }
-      high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatQueryMatrix +  i * DIM * 4),16);
-      low_bits = _mm512_loadu_si512(floatQueryMatrix +  i * DIM * 4 + 64);
-      all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
-      _mm512_storeu_si512(mbBf16 , all_bits);
-      _tile_loadd(0,maBf16, 64);
-      _tile_loadd(1,mbBf16, 4);
-      _tile_dpbf16ps(2,0,1);
-
-    } */
-     /* for( i = 0; i < blockCount/3; i+=1) {
-        int index=3*i;
-        for(int j = 0; j < batchSizeA; j++) {
-          high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatLibraryMatrix[j] +  index * DIM * 4),16);
-          low_bits = _mm512_loadu_si512(floatLibraryMatrix[j] +  index * DIM * 4 + 64);
-          all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
-          _mm512_storeu_si512(maBf16 + j * DIM * 2 , all_bits);
-        }
-
-        high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatQueryMatrix +  index * DIM * 4),16);
-        low_bits = _mm512_loadu_si512(floatQueryMatrix +  index * DIM * 4 + 64);
-        all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
-        _mm512_storeu_si512(mbBf16 , all_bits);
-
-        _tile_loadd(0,maBf16, 64);
-        _tile_loadd(1,mbBf16, 4);
-
-        for(int j = 0; j < batchSizeA; j++) {
-          high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatLibraryMatrix[j] +  (index+1) * DIM * 4),16);
-          low_bits = _mm512_loadu_si512(floatLibraryMatrix[j] +  (index+1) * DIM * 4 + 64);
-          all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
-          _mm512_storeu_si512(maBf16 + j * DIM * 2 , all_bits);
-        }
-
-        high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatQueryMatrix +  (index+1) * DIM * 4),16);
-        low_bits = _mm512_loadu_si512(floatQueryMatrix +  (index+1) * DIM * 4 + 64);
-        all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
-        _mm512_storeu_si512(mbBf16 , all_bits);
-
-        _tile_loadd(3,maBf16, 64);
-        _tile_loadd(4,mbBf16, 4);
-
-        for(int j = 0; j < batchSizeA; j++) {
-          high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatLibraryMatrix[j] +  (index+2) * DIM * 4),16);
-          low_bits = _mm512_loadu_si512(floatLibraryMatrix[j] +  (index+2) * DIM * 4 + 64);
-          all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
-          _mm512_storeu_si512(maBf16 + j * DIM * 2 , all_bits);
-        }
-
-        high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatQueryMatrix +  (index+2) * DIM * 4),16);
-        low_bits = _mm512_loadu_si512(floatQueryMatrix +  (index+2) * DIM * 4 + 64);
-        all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
-        _mm512_storeu_si512(mbBf16 , all_bits);
-
-        _tile_loadd(5,maBf16, 64);
-        _tile_loadd(6,mbBf16, 4);
-
-        _tile_dpbf16ps(2,0,1);  
-        _tile_dpbf16ps(2,3,4);
-        _tile_dpbf16ps(2,5,6);
-    }
-    switch(blockCount%3){
-      case 0: break;
-      case 1:
-        for(int j = 0; j < batchSizeA; j++) {
-          high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatLibraryMatrix[j] +  3*i * DIM * 4),16);
-          low_bits = _mm512_loadu_si512(floatLibraryMatrix[j] +  3*i * DIM * 4 + 64);
-          all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
-          _mm512_storeu_si512(maBf16 + j * DIM * 2 , all_bits);
-        }
-
-        high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatQueryMatrix +  3*i * DIM * 4),16);
-        low_bits = _mm512_loadu_si512(floatQueryMatrix +  3*i * DIM * 4 + 64);
-        all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
-        _mm512_storeu_si512(mbBf16 , all_bits);
-
-        _tile_loadd(0,maBf16, 64);
-        _tile_loadd(1,mbBf16, 4);
-        _tile_dpbf16ps(2,0,1);  
-        break;
- 
-      case 2:        
-        for(int j = 0; j < batchSizeA; j++) {
-          high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatLibraryMatrix[j] +  3*i * DIM * 4),16);
-          low_bits = _mm512_loadu_si512(floatLibraryMatrix[j] +  3*i * DIM * 4 + 64);
-          all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
-          _mm512_storeu_si512(maBf16 + j * DIM * 2 , all_bits);
-        }
-
-        high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatQueryMatrix +  3*i * DIM * 4),16);
-        low_bits = _mm512_loadu_si512(floatQueryMatrix +  3*i * DIM * 4 + 64);
-        all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
-        _mm512_storeu_si512(mbBf16 , all_bits);
-
-        _tile_loadd(0,maBf16, 64);
-        _tile_loadd(1,mbBf16, 4);
-
-        for(int j = 0; j < batchSizeA; j++) {
-          high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatLibraryMatrix[j] +  (3*i+1) * DIM * 4),16);
-          low_bits = _mm512_loadu_si512(floatLibraryMatrix[j] +  (3*i+1) * DIM * 4 + 64);
-          all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
-          _mm512_storeu_si512(maBf16 + j * DIM * 2 , all_bits);
-        }
-
-        high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatQueryMatrix +  (3*i+1) * DIM * 4),16);
-        low_bits = _mm512_loadu_si512(floatQueryMatrix +  (3*i+1) * DIM * 4 + 64);
-        all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
-        _mm512_storeu_si512(mbBf16 , all_bits);
-
-        _tile_loadd(3,maBf16, 64);
-        _tile_loadd(4,mbBf16, 4);
-        _tile_dpbf16ps(2,0,1);  
-        _tile_dpbf16ps(2,3,4);
-        break;
-    }
-   */
-   
-    _tile_stored(2, results, batchSizeB*2*2);
-    _tile_zero(2);
-   
-    if (tailCount != 0) {
-        for (int k = 0; k < batchSizeA; k++) {
-            for (int l = 0; l < batchSizeB; l++) {
-                __m512 result_vec = _mm512_setzero_ps();
-                for (int i = 0; i < tailCount; i += 16) {
-                    __m512 lib_vec = _mm512_loadu_ps((float *)(floatLibraryMatrix[k])  + DIM * blockCount + i);
-                    __m512 query_vec = _mm512_loadu_ps((float *)(floatQueryMatrix + DIM * blockCount + i));
-                    result_vec = _mm512_fmadd_ps(lib_vec, query_vec, result_vec);
-                }
-                results[k * batchSizeB + l] += _mm512_reduce_add_ps(result_vec);
-            }
-        }
-    }
- 
-    return 0;
-}
-float devided_batch_amx_inner_product(char **floatLibraryMatrix, char *floatqueryMatrix, 
-    uint64_t dims, uint64_t nSize, uint64_t mSize, float *results_amx) { 
-
-    int batchSizeA = 16, batchSizeB = 16;
-    int batchCountA = (nSize - 1) / batchSizeA + 1;
-    int batchCountB = (mSize - 1) / batchSizeB + 1;
-
-    int lastBatchSizeA = (nSize % batchSizeA == 0) ? batchSizeA : nSize % batchSizeA;
-    int lastBatchSizeB = (mSize % batchSizeB == 0) ? batchSizeB : mSize % batchSizeB;
-
-    int offsetA = batchSizeA * dims * 2;
-    int offsetB = batchSizeB * dims * 2;
-
-    float *results_ptr = results_amx;
-
-    for (int i = 0; i < batchCountA; i++) {
-        int currentBatchSizeA = (i == batchCountA - 1) ? lastBatchSizeA : batchSizeA;
-        char **currentLibraryMatrixPtr = floatLibraryMatrix + i * 16;
-
-        for (int j = 0; j < batchCountB; j++) {
-            int currentBatchSizeB = (j == batchCountB - 1) ? lastBatchSizeB : batchSizeB;
-            char *currentQueryMatrixPtr = floatqueryMatrix + j * offsetB;
-
-            amx_inner_product_matrix_bf16(currentLibraryMatrixPtr, currentQueryMatrixPtr, dims, currentBatchSizeA, currentBatchSizeB, results_ptr);
-
-            results_ptr += currentBatchSizeB * currentBatchSizeA;
-        }
-    }
-
-    return 0;
-}
 
 /* static void omp_pure_memcpy(size_t xrow, size_t blocksize, int8_t* reserve, const std::vector<int8_t*>& in_s8_1_vec) {
     size_t chunk_size = blocksize / sizeof(uint8_t);
