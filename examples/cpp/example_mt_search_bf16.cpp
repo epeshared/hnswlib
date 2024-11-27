@@ -178,7 +178,7 @@ class Int8InnerProductSpace : public hnswlib::SpaceInterface<int8_t> {
     size_t dim_;
  public:
     Int8InnerProductSpace(size_t dim) {
-        fstdistfunc_ = vector_dot_product;
+        fstdistfunc_ = vector_dot_product_opt_avx512;
         dim_ = dim;
         data_size_ = dim * sizeof(int8_t);
     }
@@ -350,12 +350,12 @@ int call_AMX_bf16(hnswlib::HierarchicalNSW<float>* alg_hnsw,Bf16InnerProductSpac
 int main() {
     int true_dim=1024;
     int dim = true_dim/2;               // Dimension of the elements
-    int max_elements = 100000;   // Maximum number of elements, should be known beforehand
+    int max_elements = 10000;   // Maximum number of elements, should be known beforehand
     int M = 16;                 // Tightly connected with internal dimensionality of the data
     int nq = max_elements;
                                 // strongly affects the memory consumption
     int ef_construction = 200;  // Controls index search speed/build speed tradeoff
-    int num_threads = 56;       // Number of threads for operations with index
+    int num_threads = 1;       // Number of threads for operations with index
 
     int top_k=5;
 
@@ -393,7 +393,7 @@ int main() {
 
     auto start_scalar = std::chrono::high_resolution_clock::now();
     for(int i=0;i<iteration;i++){
-      //call_scalar_bf16(alg_hnsw,space,data,dim,nq,top_k,num_threads);
+      call_scalar_bf16(alg_hnsw,space,data,dim,nq,top_k,num_threads);
     }
     
     auto end_scalar = std::chrono::high_resolution_clock::now();

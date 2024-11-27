@@ -43,7 +43,7 @@ static float vector_dot_product(const void* a, const void* b, const void *qty_pt
 }
 static float vector_dot_product_opt_avx512(const void* a, const void* b, const void *qty_ptr) {
   const uint8_t* pvec_u8 = (const uint8_t*)a;
-  const int8_t* pvec_s8 = (const int8_t*)a;
+  const int8_t* pvec_s8 = (const int8_t*)b;
   size_t qty32 = *((size_t*)qty_ptr) / 64;
   const uint8_t* pend_u8 = pvec_u8 + 64 * qty32;
   // calc dot
@@ -61,6 +61,14 @@ static float vector_dot_product_opt_avx512(const void* a, const void* b, const v
     pvec_s8 += 64;
   }
   float dotsum = _mm512_reduce_add_epi32(sum512);
+
+/*   int32_t result[8];
+    _mm256_storeu_si256((__m256i*)result, sum256);
+
+    float dotsum = 0;
+    for (int i = 0; i < 8; ++i) {
+        dotsum += result[i];
+    } */
   // fetch from u8 qcode
 /*   float* flt_u8 = (float*)((char*)qcode_u8 + dim);
   float scale_u8 = *flt_u8;
@@ -72,6 +80,7 @@ static float vector_dot_product_opt_avx512(const void* a, const void* b, const v
   flt_s8++;
   float sum_s8 = *flt_s8;
   float score = scale_u8 * scale_s8 * dotsum + offset_u8 * sum_s8; */
+  //std::cout<<dotsum<< " ";
   return 1-dotsum;
 }
 static float vector_dot_product_bf16(const void* a, const void* b, const void *qty_ptr) {
@@ -156,7 +165,6 @@ static float fvec_inner_product_int8_avx2int8(const void* a, const void* b, cons
     for (int i = 0; i < 8; ++i) {
         dotsum += result[i];
     }
-    //std::cout<<dotsum<< " ";
     return 1-dotsum;
 }
 
@@ -267,11 +275,17 @@ inline void ParallelFor(size_t start, size_t end, size_t numThreads, Function fn
 
 int call_scalar_int8(hnswlib::HierarchicalNSW<float>* alg_hnsw,Int8InnerProductSpace & space,float* data,int dim, int max_elements,int top_k,int num_threads){
     std::vector<hnswlib::labeltype> neighbors(max_elements);
-    ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
+/*     ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
         std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnn(data + dim * row, 1);
         hnswlib::labeltype label = result.top().second;
         neighbors[row] = label;
-    });
+    }); */
+
+    for(int row=0; row< max_elements;row++){
+        std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnn(data + dim * row, 1);
+        hnswlib::labeltype label = result.top().second;
+        neighbors[row] = label;
+    }
     float correct = 0;
     for (int i = 0; i < max_elements; i++) {
         hnswlib::labeltype label = neighbors[i];
@@ -285,11 +299,16 @@ int call_scalar_int8(hnswlib::HierarchicalNSW<float>* alg_hnsw,Int8InnerProductS
 int call_AMX_int8(hnswlib::HierarchicalNSW<float>* alg_hnsw,Int8InnerProductSpace & space,float* data,int dim, int max_elements,int top_k,int num_threads){
     //init_onednn();
     std::vector<hnswlib::labeltype> neighbors(max_elements);
-    ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
+/*     ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
         std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnnAMX(data + dim * row, 1);
         hnswlib::labeltype label = result.top().second;
         neighbors[row] = label;
-    });
+    }); */
+    for(int row=0; row< max_elements;row++){
+        std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnnAMX(data + dim * row, 1);
+        hnswlib::labeltype label = result.top().second;
+        neighbors[row] = label;
+    }
     float correct = 0;
     for (int i = 0; i < max_elements; i++) {
         hnswlib::labeltype label = neighbors[i];
@@ -336,14 +355,14 @@ int call_AMX_bf16(hnswlib::HierarchicalNSW<float>* alg_hnsw,Bf16InnerProductSpac
     return 0;
 }
 int main() {
-    int true_dim=1024;
+    int true_dim=192*8;
     int dim = true_dim/4;               // Dimension of the elements
-    int max_elements = 1000000;   // Maximum number of elements, should be known beforehand
-    int M = 16;                 // Tightly connected with internal dimensionality of the data
+    int max_elements = 10*1024;   // Maximum number of elements, should be known beforehand
+    int M = 32;                 // Tightly connected with internal dimensionality of the data
     int nq = max_elements;
                                 // strongly affects the memory consumption
     int ef_construction = 200;  // Controls index search speed/build speed tradeoff
-    int num_threads = 16;       // Number of threads for operations with index
+    int num_threads = 1;       // Number of threads for operations with index
 
     int top_k=5;
 
@@ -359,12 +378,19 @@ int main() {
     rng.seed(47);
     std::uniform_int_distribution<> distrib_int8(0, 1);
     float* data = new float[dim * max_elements];
+    float* queries = new float[dim*nq];
+
 
     uint8_t *int8_data = (uint8_t* ) data;
     for (int i = 0; i < true_dim * max_elements; i++) {
         uint8_t tmp =  (distrib_int8(rng));
         int8_data[i]=tmp;
     }
+
+/*     for(int i=0;i<true_dim * nq ;i++){
+        uint8_t tmp =  (distrib_int8(rng));
+        ((uint8_t *)queries)[i]=tmp;
+    } */
 
     // Add data to index
     ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
@@ -380,7 +406,7 @@ int main() {
 
     auto start_scalar = std::chrono::high_resolution_clock::now();
     for(int i=0;i<iteration;i++){
-      //call_scalar_int8(alg_hnsw,space,data,dim,nq,top_k,num_threads);
+      call_scalar_int8(alg_hnsw,space,data,dim,nq,top_k,num_threads);
     }
     
     auto end_scalar = std::chrono::high_resolution_clock::now();

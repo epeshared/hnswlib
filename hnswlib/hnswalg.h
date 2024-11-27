@@ -406,7 +406,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
               }
               if(size>0) {
                 //printf("compuet dim:%d,size:%d\n",dim-1,size);
-                  memset(res,0,sizeof(int32_t)*jj);
+                //memset(res,0,sizeof(int32_t)*jj);
                 //devided_batch_amx_inner_product((int8_t**)&data_point,(int8_t**)&mydata,dim,1,jj,res);
                 
                 devided_batch_amx_inner_product_int8((int8_t**)mydata,(int8_t**)&data_point,dim,jj,1,(int32_t*)res);
@@ -1630,7 +1630,6 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
         size_t dim=(size_t)(*(size_t *)dist_func_param_);
         if(mydata==NULL){
           mydata=(void**)malloc(sizeof(dist_t*)*maxM0_);
-          relay_out=(void*)malloc(sizeof(dist_t)*maxM0_*dim);
           res=(int32_t*) malloc(maxM0_*sizeof(int32_t)); 
           memset(res,0,maxM0_*sizeof(int32_t));  
           //printf("We are 1443lines\n");
@@ -1657,16 +1656,18 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                     void* curData=getDataByInternalId(cand);
                     mydata[i] = curData;
  
-                    _mm_prefetch((char *) (mydata[i]), _MM_HINT_T1);
+/*                     _mm_prefetch((char *) (mydata[i])+0, _MM_HINT_T0);
+                    _mm_prefetch((char *) (mydata[i])+64, _MM_HINT_T0);
+                    _mm_prefetch((char *) (mydata[i])+128, _MM_HINT_T0); */
                     //memcpy(mydata+i*dim*sizeof(dist_t),curData,dim*sizeof(dist_t));
                   }
-  /*                 int32_t scalar_result[32]={0};
+/*                   int32_t scalar_result[32]={0};
                     for(int i=0;i<size;i++){
                         scalar_result[i]+=vector_dot_product_int32_t((void*)query_data,(void*)mydata[i],dist_func_param_);
                     }  */
-                    memset(res,0,sizeof(int32_t)*size);
+                    //memset(res,0,sizeof(int32_t)*size);
                     devided_batch_amx_inner_product_int8((int8_t**)mydata,(int8_t**)&query_data,dim,size,1,(int32_t*)res);
-  /*                    for(int i=0;i<size;i++){
+/*                      for(int i=0;i<size;i++){
                       printf("id:%d scalar:%d amx:%d\n",i,scalar_result[i],((int32_t*)res)[i]);
                     }   */
                   int32_t *myres= (int32_t *) res;
