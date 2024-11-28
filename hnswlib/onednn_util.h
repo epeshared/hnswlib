@@ -4,7 +4,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <cstring> 
-#include "oneapi/dnnl/dnnl.hpp"
+//#include "oneapi/dnnl/dnnl.hpp"
 #include <immintrin.h> 
 #include <omp.h>
 #include <sys/time.h>
@@ -12,8 +12,6 @@
 #include <unistd.h>
 
 
-static dnnl::engine cpu_engine;
-static dnnl::stream engine_stream;
 static bool is_onednn_init = false;
 static std::mutex init_mutex;
 
@@ -96,32 +94,6 @@ void amx_int8_mul(void *cfg, void *ma, void *mb, int64_t a_stride, int64_t b_str
     return ;  // 返回 mc 的地址
 }
 
-int parall_memcpy(int8_t* dst, std::vector<int8_t*> src, size_t blocksize,size_t offset, size_t len){
-     for (size_t i = offset; i+ offset < len; i++)
-     {
-        std::memcpy(dst + i * blocksize,src[i],blocksize);
-     }
-
-     return 0;
-     
-}
-
-int parall_memcpy_bf16(uint16_t* dst, std::vector<uint16_t*>& src, size_t blocksize, size_t offset, size_t len) {
-     for (size_t i = offset; i+ offset < len; i++)
-     {
-        std::memcpy(dst + i * blocksize,src[i],blocksize);
-     }
-
-    return 0;
-}
-
-static void omp_memcpy_bf16(size_t xrow, size_t xcol, size_t blocksize, uint16_t* reserve, std::vector<uint16_t*> bf16_vec) {
-#pragma omp parallel for
-    for (size_t i = 0; i < xrow; i++) {
-        std::copy(bf16_vec[i], bf16_vec[i] + blocksize, reserve + i * blocksize);    
-    }                
-}
-
 static bool is_amxbf16_supported() {
     unsigned int eax, ebx, ecx, edx;
     __asm__ __volatile__("cpuid"
@@ -170,90 +142,6 @@ __attribute__((constructor)) static void library_load() {
  * @param out_f32 Output matrix pointer for result in float32 type
  * @return None
  */
-static void  compute_s8s8f32_inner_product(
-        uint32_t xrow,
-        uint32_t xcol,
-        uint32_t yrow,
-        uint32_t ycol,
-        int8_t* in_s8_1,
-        int8_t* in_s8_2,
-        int8_t* relay_out,
-        float* out_f32) {
-    dnnl::memory::desc s8_md1 = dnnl::memory::desc(
-            {xrow, xcol},
-            dnnl::memory::data_type::s8,
-            dnnl::memory::format_tag::ab);
-    dnnl::memory::desc s8_md2 = dnnl::memory::desc(
-            {yrow, ycol},
-            dnnl::memory::data_type::s8,
-            dnnl::memory::format_tag::any);
-    dnnl::memory::desc f32_dst_md2 = dnnl::memory::desc(
-            {xrow, yrow},
-            dnnl::memory::data_type::f32,
-            dnnl::memory::format_tag::ab);
-
-    //dnnl::memory s8_mem1 = dnnl::memory(s8_md1, cpu_engine, in_s8_1);
-    //dnnl::memory s8_mem2 = dnnl::memory(s8_md2, cpu_engine, in_s8_2);
-
-    dnnl::memory f32_dst_mem = dnnl::memory(f32_dst_md2, cpu_engine, out_f32);
-
-
-    dnnl::inner_product_forward::primitive_desc inner_product_pd =
-            dnnl::inner_product_forward::primitive_desc(
-                    cpu_engine,
-                    dnnl::prop_kind::forward_training,
-                    s8_md1,
-                    s8_md2,
-                    f32_dst_md2);
-
-    dnnl::inner_product_forward inner_product_prim =
-            dnnl::inner_product_forward(inner_product_pd);
-
-    
-    
-/*     dnnl::memory s8_mem1 =
-            dnnl::memory(inner_product_pd.src_desc(), cpu_engine,in_s8_1);
-    dnnl::memory s8_mem2 =
-            dnnl::memory(inner_product_pd.weights_desc(), cpu_engine,in_s8_2);   */
-          
-   
-    dnnl::memory s8_mem1 = dnnl::memory(inner_product_pd.src_desc(), cpu_engine,NULL);
-    //dnnl::memory s8_mem2 = dnnl::memory(inner_product_pd.weights_desc(), cpu_engine); 
-    dnnl::memory s8_mem2(
-                {{yrow, ycol}, dnnl::memory::data_type::s8, dnnl::memory::format_tag::ab}, cpu_engine,NULL);
-    dnnl::memory b_s8_mem2 = dnnl::memory(inner_product_pd.weights_desc(), cpu_engine,NULL);
-     
-    s8_mem1.set_data_handle(in_s8_1);
-    s8_mem2.set_data_handle(in_s8_2);
-    b_s8_mem2.set_data_handle(relay_out);
-
-    
-    dnnl::reorder(s8_mem2, b_s8_mem2).execute(engine_stream, s8_mem2, b_s8_mem2);
-
-      
-   // write_to_dnnl_memory(in_s8_1,s8_mem1);
-    //write_to_dnnl_memory(in_s8_2,s8_mem2);        
-    
-/* 
-    inner_product_prim.execute(
-            engine_stream,
-            {{DNNL_ARG_SRC, s8_mem1},
-             {DNNL_ARG_WEIGHTS, b_s8_mem2},
-             {DNNL_ARG_DST, f32_dst_mem}}); */
-    inner_product_prim.execute(
-            engine_stream,
-            {{DNNL_ARG_SRC, s8_mem1},
-             {DNNL_ARG_WEIGHTS, s8_mem2},
-             {DNNL_ARG_DST, f32_dst_mem}});
-
-    // Wait for the computation to finalize.
-    engine_stream.wait(); 
-
-    // for (size_t i = 0; i < xrow * yrow; i++)
-    // {
-    //     printf("out_f32[%ld]=%ld\n", i, (uint64_t)out_f32[i]);
-    // }    
-}
 
 /* static void  compute_s8s8f32_inner_product_memcp(
         uint32_t xrow,
@@ -275,16 +163,7 @@ static void  compute_s8s8f32_inner_product(
     compute_s8s8f32_inner_product(xrow,xcol,yrow,ycol,in_s8_1.get(),in_s8_2,out_f32);       
 } */
 
-inline void prefetch_data(int8_t* data, size_t size) {
-    
-    for (size_t i = 0; i < size; i+=256) {
-        _mm_prefetch(reinterpret_cast<const char*>(&data[i]), _MM_HINT_T2);
-        _mm_prefetch(reinterpret_cast<const char*>(&data[i+64]), _MM_HINT_T2);
-        _mm_prefetch(reinterpret_cast<const char*>(&data[i+128]), _MM_HINT_T2);
-        _mm_prefetch(reinterpret_cast<const char*>(&data[i+192]), _MM_HINT_T2);
 
-    }
-}
 
 int32_t add_all(int32_t *results,int32_t *result, uint64_t batchSize) __attribute__((optimize("-O0")));
 int32_t add_all(int32_t *results,int32_t *result, uint64_t batchSize){
@@ -294,6 +173,48 @@ int32_t add_all(int32_t *results,int32_t *result, uint64_t batchSize){
   return 0;
 }
 
+float fvec_inner_product_int8_avx2int8_tail(const void* a, const void* b, const void *qty_ptr) {
+  //exit(-1);
+  const uint8_t* pvec_u8 = (const uint8_t*)a;
+    const int8_t* pvec_s8 = (const int8_t*)b;
+    size_t qty32 = *((size_t*)qty_ptr) / 32;
+    const uint8_t* pend_u8 = pvec_u8 + 32 * qty32;
+
+    // 初始化累加和为 0
+    __m256i sum256 = _mm256_setzero_si256();
+    __m256i v1, v2, v3;
+
+    // 创建一个包含 1 的 128 位向量
+    __m128i one = _mm_set1_epi16(1);
+    // 广播 1 到 256 位向量
+    __m256i agg_base = _mm256_broadcastw_epi16(one);
+
+    while (pvec_u8 < pend_u8) {
+        v1 = _mm256_loadu_si256((__m256i*)pvec_u8);
+        v2 = _mm256_loadu_si256((__m256i*)pvec_s8);
+        v3 = _mm256_maddubs_epi16(v1, v2);
+        sum256 = _mm256_add_epi32(sum256, _mm256_madd_epi16(v3, agg_base));
+        pvec_u8 += 32;
+        pvec_s8 += 32;
+    }
+
+
+
+    // 将 SIMD 寄存器中的结果累积到一个标量值
+    int32_t result[8];
+    _mm256_storeu_si256((__m256i*)result, sum256);
+
+    float dotsum = 0;
+    for (int i = 0; i < 8; ++i) {
+        dotsum += result[i];
+    }
+
+
+    for (size_t i =0; i < *((size_t*)qty_ptr)-32 * qty32; i++) {
+        dotsum +=pvec_u8[i] * pvec_s8[i];
+    }
+    return dotsum;
+}
 static int32_t vector_dot_product_int32_t(const void* a, const void* b, const void *qty_ptr) {
 
     uint32_t length = * (uint32_t*)qty_ptr;
@@ -543,8 +464,9 @@ float amx_inner_product_matrix_int8( int8_t **libraryMatrix, int8_t *queryMatrix
   int DIM=64;
 
   int blockDim = 192;
-  int blockCount=((dims)-1)/blockDim+1;
-  int tailCount=dims%DIM;
+  int blockCount=((dims))/blockDim;
+  size_t tailCount=dims%DIM;
+  int tailBlock=dims%blockDim;
   thread_local unsigned char *ma1Int8=NULL, *ma2Int8=NULL, *ma3Int8=NULL;
   thread_local bool init_mem=false;
   thread_local char cfg[64]={0};
@@ -585,30 +507,18 @@ float amx_inner_product_matrix_int8( int8_t **libraryMatrix, int8_t *queryMatrix
   memset(ma1Int8,0,16*DIM);  
   memset(ma2Int8,0,16*DIM); 
   memset(ma3Int8,0,16*DIM);  
-
-
-
-/*    */
-
-  unsigned char* ma1Int8l=ma1Int8 ,* ma2Int8l=ma2Int8, *ma3Int8l=ma3Int8;
   for(int i=0;i<blockCount;i++){
 
     //int32_t stride=i*DIM;
     __m512i sa;
     for(int j=0;j<batchSizeA;j++){  
 
-
-
-/*       memcpy(ma1Int8+j*DIM,libraryMatrix[j]+i*blockDim,64);
-      memcpy(ma2Int8+j*DIM,libraryMatrix[j]+i*blockDim+64,64);
-      memcpy(ma3Int8+j*DIM,libraryMatrix[j]+i*blockDim+128,64); */
       sa=_mm512_load_si512(libraryMatrix[j]+i*blockDim);
-      _mm512_store_si512(ma1Int8l+j*DIM,sa);
+      _mm512_store_si512(ma1Int8+j*DIM,sa);
       sa=_mm512_load_si512(libraryMatrix[j]+i*blockDim+64);
-      _mm512_store_si512(ma2Int8l+j*DIM,sa);
+      _mm512_store_si512(ma2Int8+j*DIM,sa);
       sa=_mm512_load_si512(libraryMatrix[j]+i*blockDim+128);
-      _mm512_store_si512(ma3Int8l+j*DIM,sa);
-
+      _mm512_store_si512(ma3Int8+j*DIM,sa);
     } 
 
 
@@ -624,13 +534,26 @@ float amx_inner_product_matrix_int8( int8_t **libraryMatrix, int8_t *queryMatrix
     _tile_dpbuud(2,5,6);
     //amx_int8_mul((u64*) cfg, maInt8,queryMatrix+stride,DIM,batchSizeB*4,(void*)results);
   }
+  if(tailBlock >= DIM){
+    for(int i=0;i<tailBlock/DIM;i++){
+      __m512i sa;
+      for(int j=0;j<batchSizeA;j++){  
+        sa=_mm512_load_si512(libraryMatrix[j]+blockCount*blockDim+i*DIM);
+        _mm512_store_si512(ma1Int8+j*DIM,sa);
+      }
+      _tile_loadd(0,ma1Int8, 64);
+      _tile_loadd(1,queryMatrix + blockCount*blockDim + i * DIM , 4);
+      _tile_dpbuud(2,0,1);
+    }
+  }
+
   _tile_stored(2,results,batchSizeB*4);
   _tile_zero(2);
 
   if(tailCount!=0){
     for(int k=0;k<batchSizeA;k++){
       for(int l=0;l<batchSizeB;l++){
-        results[k*batchSizeB+l]+=vector_dot_product_int32_t(libraryMatrix[k]+DIM*blockCount,queryMatrix+l*dims+DIM*blockCount,&tailCount);
+        results[k*batchSizeB+l]+=(float)fvec_inner_product_int8_avx2int8_tail(libraryMatrix[k]+(dims/DIM)*DIM,queryMatrix+l*dims+(dims/DIM)*DIM,&tailCount);
       }
     }
   }

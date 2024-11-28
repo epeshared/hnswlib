@@ -404,7 +404,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                       //printf("dim:%d\n",dim);
                 }
               }
-              if(size>0) {
+              if(jj>0) {
                 //printf("compuet dim:%d,size:%d\n",dim-1,size);
                 //memset(res,0,sizeof(int32_t)*jj);
                 //devided_batch_amx_inner_product((int8_t**)&data_point,(int8_t**)&mydata,dim,1,jj,res);

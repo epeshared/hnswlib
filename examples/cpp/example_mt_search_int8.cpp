@@ -152,10 +152,6 @@ static float fvec_inner_product_int8_avx2int8(const void* a, const void* b, cons
         pvec_s8 += 32;
     }
 
-    // 处理剩余数据
-    for (size_t i = 32 * qty32; i < *((size_t*)qty_ptr); i++) {
-        sum256 = _mm256_add_epi32(sum256, _mm256_set1_epi32(pvec_u8[i] * pvec_s8[i]));
-    }
 
     // 将 SIMD 寄存器中的结果累积到一个标量值
     int32_t result[8];
@@ -164,6 +160,10 @@ static float fvec_inner_product_int8_avx2int8(const void* a, const void* b, cons
     float dotsum = 0;
     for (int i = 0; i < 8; ++i) {
         dotsum += result[i];
+    }
+
+    for (size_t i =0; i < *((size_t*)qty_ptr)-32 * qty32; i++) {
+        dotsum +=pvec_u8[i] * pvec_s8[i];
     }
     return 1-dotsum;
 }
@@ -275,17 +275,17 @@ inline void ParallelFor(size_t start, size_t end, size_t numThreads, Function fn
 
 int call_scalar_int8(hnswlib::HierarchicalNSW<float>* alg_hnsw,Int8InnerProductSpace & space,float* data,int dim, int max_elements,int top_k,int num_threads){
     std::vector<hnswlib::labeltype> neighbors(max_elements);
-/*     ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
+    ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
         std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnn(data + dim * row, 1);
         hnswlib::labeltype label = result.top().second;
         neighbors[row] = label;
-    }); */
+    });
 
-    for(int row=0; row< max_elements;row++){
+/*     for(int row=0; row< max_elements;row++){
         std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnn(data + dim * row, 1);
         hnswlib::labeltype label = result.top().second;
         neighbors[row] = label;
-    }
+    } */
     float correct = 0;
     for (int i = 0; i < max_elements; i++) {
         hnswlib::labeltype label = neighbors[i];
@@ -299,16 +299,16 @@ int call_scalar_int8(hnswlib::HierarchicalNSW<float>* alg_hnsw,Int8InnerProductS
 int call_AMX_int8(hnswlib::HierarchicalNSW<float>* alg_hnsw,Int8InnerProductSpace & space,float* data,int dim, int max_elements,int top_k,int num_threads){
     //init_onednn();
     std::vector<hnswlib::labeltype> neighbors(max_elements);
-/*     ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
+    ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
         std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnnAMX(data + dim * row, 1);
         hnswlib::labeltype label = result.top().second;
         neighbors[row] = label;
-    }); */
-    for(int row=0; row< max_elements;row++){
+    });
+/*     for(int row=0; row< max_elements;row++){
         std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnnAMX(data + dim * row, 1);
         hnswlib::labeltype label = result.top().second;
         neighbors[row] = label;
-    }
+    } */
     float correct = 0;
     for (int i = 0; i < max_elements; i++) {
         hnswlib::labeltype label = neighbors[i];
@@ -355,18 +355,18 @@ int call_AMX_bf16(hnswlib::HierarchicalNSW<float>* alg_hnsw,Bf16InnerProductSpac
     return 0;
 }
 int main() {
-    int true_dim=192*8;
+    int true_dim=4*253;
     int dim = true_dim/4;               // Dimension of the elements
     int max_elements = 10*1024;   // Maximum number of elements, should be known beforehand
     int M = 32;                 // Tightly connected with internal dimensionality of the data
     int nq = max_elements;
                                 // strongly affects the memory consumption
     int ef_construction = 200;  // Controls index search speed/build speed tradeoff
-    int num_threads = 1;       // Number of threads for operations with index
+    int num_threads = 16;       // Number of threads for operations with index
 
     int top_k=5;
 
-    int iteration=10;
+    int iteration=1;
 
   
     // Initing index
