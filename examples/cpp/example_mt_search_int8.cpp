@@ -62,6 +62,10 @@ static float vector_dot_product_opt_avx512(const void* a, const void* b, const v
   }
   float dotsum = _mm512_reduce_add_epi32(sum512);
 
+  for (size_t i =0; i < *((size_t*)qty_ptr)-64 * qty32; i++) {
+    dotsum +=pvec_u8[i] * pvec_s8[i];
+  }
+
 /*   int32_t result[8];
     _mm256_storeu_si256((__m256i*)result, sum256);
 
@@ -174,7 +178,7 @@ class Int8InnerProductSpace : public hnswlib::SpaceInterface<float> {
     size_t dim_;
  public:
     Int8InnerProductSpace(size_t dim) {
-        fstdistfunc_ = fvec_inner_product_int8_avx2int8;
+        fstdistfunc_ = vector_dot_product_opt_avx512;
         dim_ = dim * 4;
         data_size_ = dim * sizeof(int8_t) * 4;
     }
@@ -355,18 +359,18 @@ int call_AMX_bf16(hnswlib::HierarchicalNSW<float>* alg_hnsw,Bf16InnerProductSpac
     return 0;
 }
 int main() {
-    int true_dim=64*3*10;
+    int true_dim=2048;
     int dim = true_dim/4;               // Dimension of the elements
-    int max_elements = 1000*1024;   // Maximum number of elements, should be known beforehand
+    int max_elements = 100*1024;   // Maximum number of elements, should be known beforehand
     int M = 32;                 // Tightly connected with internal dimensionality of the data
     int nq = max_elements;
                                 // strongly affects the memory consumption
     int ef_construction = 200;  // Controls index search speed/build speed tradeoff
-    int num_threads = 16;       // Number of threads for operations with index
+    int num_threads = 32;       // Number of threads for operations with index
 
     int top_k=1;
 
-    int iteration=10;
+    int iteration=3;
 
   
     // Initing index

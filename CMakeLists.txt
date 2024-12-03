@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.0...3.26)
 
+# set(CMAKE_C_COMPILER "clang")
+# set(CMAKE_CXX_COMPILER "clang++")
+# set(CMAKE_LINKER "ld.lld")
 project(hnswlib
     LANGUAGES CXX)
 
@@ -33,7 +36,7 @@ else()
 endif()
 if(HNSWLIB_EXAMPLES)
     set(CMAKE_CXX_STANDARD 11)
-
+    message(${CMAKE_CXX_COMPILER_ID})
     if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
       SET( CMAKE_CXX_FLAGS  "-Ofast -std=c++11 -DHAVE_CXX0X -openmp -fpic -ftree-vectorize" )
       check_cxx_compiler_flag("-march=native" COMPILER_SUPPORT_NATIVE_FLAG)
@@ -48,7 +51,7 @@ if(HNSWLIB_EXAMPLES)
         endif()
       endif()
     elseif (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-      SET( CMAKE_CXX_FLAGS  " -ldnnl -mavx512f -mavx512cd -mavx512bw -mamx-bf16 -mamx-tile -mamx-int8 -Ofast -g -funroll-loops -lrt -std=c++11 -DHAVE_CXX0X -march=native -fpic -w -fopenmp -ftree-vectorize -ftree-vectorizer-verbose=0" )
+      SET( CMAKE_CXX_FLAGS  "-flto -mavx512f -mavx512cd -mavx512bw -mamx-bf16 -mamx-tile -mamx-int8 -Ofast -g -funroll-loops -lrt -std=c++11 -DHAVE_CXX0X -march=native -fpic -w -fopenmp -ftree-vectorize -ftree-vectorizer-verbose=0" )
     elseif (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
       SET( CMAKE_CXX_FLAGS  "/O2 -DHAVE_CXX0X /W1 /openmp /EHsc" )
     endif()
