@@ -18,7 +18,7 @@ typedef unsigned int linklistsizeint;
 
 thread_local void **mydata=NULL;
 thread_local void *relay_out=NULL;
-thread_local int32_t *res=NULL;
+thread_local void *res=NULL;
 
 
 template<typename dist_t>
@@ -126,7 +126,11 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
         update_probability_generator_.seed(random_seed + 1);
 
         size_links_level0_ = maxM0_ * sizeof(tableint) + sizeof(linklistsizeint);
+        size_links_level0_ = ((size_links_level0_ + 63) / 64) * 64;
+
         size_data_per_element_ = size_links_level0_ + data_size_ + sizeof(labeltype);
+
+        size_data_per_element_ = ((size_data_per_element_ + 63) / 64) * 64;
         offsetData_ = size_links_level0_;
         label_offset_ = size_links_level0_ + data_size_;
         offsetLevel0_ = 0;
@@ -377,32 +381,32 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                 metric_hops++;
                 metric_distance_computations+=size;
             }
-
-#ifdef USE_SSE
-            _mm_prefetch((char *) (visited_array + *(data + 1)), _MM_HINT_T0);
-            _mm_prefetch((char *) (visited_array + *(data + 1) + 64), _MM_HINT_T0);
-            _mm_prefetch(data_level0_memory_ + (*(data + 1)) * size_data_per_element_ + offsetData_, _MM_HINT_T0);
-            _mm_prefetch((char *) (data + 2), _MM_HINT_T0);
-#endif  
+ 
             size_t jj=0;
-            for (size_t j = 1; j <= size; j++) {
-              int candidate_id = *(data + j);
-              if (!(visited_array[candidate_id] == visited_array_tag)) {
-                    //visited_array[candidate_id] = visited_array_tag;
-                    char *currObj1 = (getDataByInternalId(candidate_id));
-                    //memcpy(mydata+(jj++)*(int32_t)dim*sizeof(dist_t),currObj1,dim*sizeof(dist_t));
-                    mydata[jj++]=currObj1;
-                    //printf("dim:%d\n",dim);
+            if(size > 8){
+              
+              for (size_t j = 1; j <= size; j++) {
+                int candidate_id = *(data + j);
+                if (!(visited_array[candidate_id] == visited_array_tag)) {
+                      //visited_array[candidate_id] = visited_array_tag;
+                      char *currObj1 = (getDataByInternalId(candidate_id));
+                      //memcpy(mydata+(jj++)*(int32_t)dim*sizeof(dist_t),currObj1,dim*sizeof(dist_t));
+                      mydata[jj++]=currObj1;
+
+                      //_mm_prefetch((char *) (mydata[jj-1]), _MM_HINT_T0);
+                      //_mm_prefetch((char *) (mydata[jj-1])+64, _MM_HINT_T0);
+                      //printf("dim:%d\n",dim);
+                }
               }
-            }
-            if(size>0) {
-              //printf("compuet dim:%d,size:%d\n",dim-1,size);
-               memset(res,0,sizeof(int32_t)*jj);
-              //devided_batch_amx_inner_product((int8_t**)&data_point,(int8_t**)&mydata,dim,1,jj,res);
-             
-              devided_batch_amx_inner_product((int8_t**)mydata,(int8_t**)&data_point,dim,jj,1,res);
-              //compute_s8s8f32_inner_product(1,dim,jj,dim,(int8_t*)data_point,(int8_t*)mydata,(int8_t*)relay_out,(float*)res);
-              //compute_s8s8f32_inner_product(jj,dim,1,dim,(int8_t*)mydata,(int8_t*)data_point,(int8_t*)relay_out,(float*)res);
+              if(jj>0) {
+                //printf("compuet dim:%d,size:%d\n",dim-1,size);
+                //memset(res,0,sizeof(int32_t)*jj);
+                //devided_batch_amx_inner_product((int8_t**)&data_point,(int8_t**)&mydata,dim,1,jj,res);
+                
+                devided_batch_amx_inner_product_int8((int8_t**)mydata,(int8_t**)&data_point,dim,jj,1,(int32_t*)res);
+                //compute_s8s8f32_inner_product(1,dim,jj,dim,(int8_t*)data_point,(int8_t*)mydata,(int8_t*)relay_out,(float*)res);
+                //compute_s8s8f32_inner_product(jj,dim,1,dim,(int8_t*)mydata,(int8_t*)data_point,(int8_t*)relay_out,(float*)res);
+              }
             }
 
             //printf("jj:%d\n",jj);
@@ -420,8 +424,13 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                     visited_array[candidate_id] = visited_array_tag;
 
                     char *currObj1 = (getDataByInternalId(candidate_id));
-                    //dist_t dist = fstdistfunc_(data_point, currObj1, dist_func_param_);
-                    dist_t dist=res[jj++];
+                    dist_t dist;
+                    if(size<=8){
+                      dist = fstdistfunc_(data_point, currObj1, dist_func_param_);
+                    }else{
+                      int32_t * myres= (int32_t *)res;
+                      dist=1-(dist_t)myres[jj++];
+                    }
                     bool flag_consider_candidate;
                     if (!bare_bone_search && stop_condition) {
                         flag_consider_candidate = stop_condition->should_consider_candidate(dist, lowerBound);
@@ -472,7 +481,316 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
         visited_list_pool_->releaseVisitedList(vl);
         return top_candidates;
     }
+    template <bool bare_bone_search = true, bool collect_metrics = false>
+    std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst>
+    searchBaseLayerSTAMX_bf16(
+        tableint ep_id,
+        const void *data_point,
+        size_t ef,
+        BaseFilterFunctor* isIdAllowed = nullptr,
+        BaseSearchStopCondition<dist_t>* stop_condition = nullptr) const {
+        VisitedList *vl = visited_list_pool_->getFreeVisitedList();
+        vl_type *visited_array = vl->mass;
+        vl_type visited_array_tag = vl->curV;
 
+        std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
+        std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> candidate_set;
+
+        dist_t lowerBound;
+        if (bare_bone_search || 
+            (!isMarkedDeleted(ep_id) && ((!isIdAllowed) || (*isIdAllowed)(getExternalLabel(ep_id))))) {
+            char* ep_data = getDataByInternalId(ep_id);
+            dist_t dist = fstdistfunc_(data_point, ep_data, dist_func_param_);
+            lowerBound = dist;
+            top_candidates.emplace(dist, ep_id);
+            if (!bare_bone_search && stop_condition) {
+                stop_condition->add_point_to_result(getExternalLabel(ep_id), ep_data, dist);
+            }
+            candidate_set.emplace(-dist, ep_id);
+        } else {
+            lowerBound = std::numeric_limits<dist_t>::max();
+            candidate_set.emplace(-lowerBound, ep_id);
+        }
+
+        visited_array[ep_id] = visited_array_tag;
+
+
+        size_t dim=(size_t)(*(size_t *)dist_func_param_);
+/*         void *mydata=(void*)malloc(sizeof(dist_t)*maxM0_*dim);
+        float *res=(float*) malloc(maxM0_*sizeof(float));
+        memset(res,0,maxM0_*sizeof(float));  */
+        while (!candidate_set.empty()) {
+            std::pair<dist_t, tableint> current_node_pair = candidate_set.top();
+            dist_t candidate_dist = -current_node_pair.first;
+
+            bool flag_stop_search;
+            if (bare_bone_search) {
+                flag_stop_search = candidate_dist > lowerBound;
+            } else {
+                if (stop_condition) {
+                    flag_stop_search = stop_condition->should_stop_search(candidate_dist, lowerBound);
+                } else {
+                    flag_stop_search = candidate_dist > lowerBound && top_candidates.size() == ef;
+                }
+            }
+            if (flag_stop_search) {
+                break;
+            }
+            candidate_set.pop();
+
+            tableint current_node_id = current_node_pair.second;
+            int *data = (int *) get_linklist0(current_node_id);
+            size_t size = getListCount((linklistsizeint*)data);
+//                bool cur_node_deleted = isMarkedDeleted(current_node_id);
+            if (collect_metrics) {
+                metric_hops++;
+                metric_distance_computations+=size;
+            }
+            size_t jj=0;
+            for (size_t j = 1; j <= size; j++) {
+              int candidate_id = *(data + j);
+              if (!(visited_array[candidate_id] == visited_array_tag)) {
+                    //visited_array[candidate_id] = visited_array_tag;
+                    char *currObj1 = (getDataByInternalId(candidate_id));
+                    //memcpy(mydata+(jj++)*(int32_t)dim*sizeof(dist_t),currObj1,dim*sizeof(dist_t));
+                    mydata[jj++]=currObj1;
+                    //printf("dim:%d\n",dim);
+              }
+            }
+            if(size>0) {
+              //printf("compuet dim:%d,size:%d\n",dim-1,size);
+               memset(res,0,sizeof(float)*jj);
+              //devided_batch_amx_inner_product((int8_t**)&data_point,(int8_t**)&mydata,dim,1,jj,res);
+             
+              devided_batch_amx_inner_product((char**)mydata,(char*)data_point,dim,jj,1,(float*)res);
+              //compute_s8s8f32_inner_product(1,dim,jj,dim,(int8_t*)data_point,(int8_t*)mydata,(int8_t*)relay_out,(float*)res);
+              //compute_s8s8f32_inner_product(jj,dim,1,dim,(int8_t*)mydata,(int8_t*)data_point,(int8_t*)relay_out,(float*)res);
+            }
+
+            //printf("jj:%d\n",jj);
+            jj=0;
+            for (size_t j = 1; j <= size; j++) {
+                int candidate_id = *(data + j);
+
+//                    if (candidate_id == 0) continue;
+/* #ifdef USE_SSE
+                _mm_prefetch((char *) (visited_array + *(data + j + 1)), _MM_HINT_T0);
+                _mm_prefetch(data_level0_memory_ + (*(data + j + 1)) * size_data_per_element_ + offsetData_,
+                                _MM_HINT_T0);  ////////////
+#endif */
+                if (!(visited_array[candidate_id] == visited_array_tag)) {
+                    visited_array[candidate_id] = visited_array_tag;
+
+                    char *currObj1 = (getDataByInternalId(candidate_id));
+                    //dist_t dist = fstdistfunc_(data_point, currObj1, dist_func_param_);
+                    dist_t * myres= (dist_t *)res;
+                    dist_t dist=1.0f-(dist_t)myres[jj++];
+                    bool flag_consider_candidate;
+                    if (!bare_bone_search && stop_condition) {
+                        flag_consider_candidate = stop_condition->should_consider_candidate(dist, lowerBound);
+                    } else {
+                        flag_consider_candidate = top_candidates.size() < ef || lowerBound > dist;
+                    }
+
+                    if (flag_consider_candidate) {
+                        candidate_set.emplace(-dist, candidate_id);
+#ifdef USE_SSE
+                        _mm_prefetch(data_level0_memory_ + candidate_set.top().second * size_data_per_element_ +
+                                        offsetLevel0_,  ///////////
+                                        _MM_HINT_T0);  ////////////////////////
+#endif
+
+                        if (bare_bone_search || 
+                            (!isMarkedDeleted(candidate_id) && ((!isIdAllowed) || (*isIdAllowed)(getExternalLabel(candidate_id))))) {
+
+                            top_candidates.emplace(dist, candidate_id);
+                            if (!bare_bone_search && stop_condition) {
+                                stop_condition->add_point_to_result(getExternalLabel(candidate_id), currObj1, dist);
+                            }
+                        }
+
+                        bool flag_remove_extra = false;
+                        if (!bare_bone_search && stop_condition) {
+                            flag_remove_extra = stop_condition->should_remove_extra();
+                        } else {
+                            flag_remove_extra = top_candidates.size() > ef;
+                        }
+                        while (flag_remove_extra) {
+                            tableint id = top_candidates.top().second;
+                            top_candidates.pop();
+                            if (!bare_bone_search && stop_condition) {
+                                stop_condition->remove_point_from_result(getExternalLabel(id), getDataByInternalId(id), dist);
+                                flag_remove_extra = stop_condition->should_remove_extra();
+                            } else {
+                                flag_remove_extra = top_candidates.size() > ef;
+                            }
+                        }
+
+                        if (!top_candidates.empty())
+                            lowerBound = top_candidates.top().first;
+                    }
+                }
+            }
+        }
+
+        visited_list_pool_->releaseVisitedList(vl);
+        return top_candidates;
+    }
+
+    template <bool bare_bone_search = true, bool collect_metrics = false>
+    std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst>
+    searchBaseLayerSTAMX_fp32(
+        tableint ep_id,
+        const void *data_point,
+        size_t ef,
+        BaseFilterFunctor* isIdAllowed = nullptr,
+        BaseSearchStopCondition<dist_t>* stop_condition = nullptr) const {
+        VisitedList *vl = visited_list_pool_->getFreeVisitedList();
+        vl_type *visited_array = vl->mass;
+        vl_type visited_array_tag = vl->curV;
+
+        std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
+        std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> candidate_set;
+
+        dist_t lowerBound;
+        if (bare_bone_search || 
+            (!isMarkedDeleted(ep_id) && ((!isIdAllowed) || (*isIdAllowed)(getExternalLabel(ep_id))))) {
+            char* ep_data = getDataByInternalId(ep_id);
+            dist_t dist = fstdistfunc_(data_point, ep_data, dist_func_param_);
+            lowerBound = dist;
+            top_candidates.emplace(dist, ep_id);
+            if (!bare_bone_search && stop_condition) {
+                stop_condition->add_point_to_result(getExternalLabel(ep_id), ep_data, dist);
+            }
+            candidate_set.emplace(-dist, ep_id);
+        } else {
+            lowerBound = std::numeric_limits<dist_t>::max();
+            candidate_set.emplace(-lowerBound, ep_id);
+        }
+
+        visited_array[ep_id] = visited_array_tag;
+
+
+        size_t dim=(size_t)(*(size_t *)dist_func_param_);
+/*         void *mydata=(void*)malloc(sizeof(dist_t)*maxM0_*dim);
+        float *res=(float*) malloc(maxM0_*sizeof(float));
+        memset(res,0,maxM0_*sizeof(float));  */
+        while (!candidate_set.empty()) {
+            std::pair<dist_t, tableint> current_node_pair = candidate_set.top();
+            dist_t candidate_dist = -current_node_pair.first;
+
+            bool flag_stop_search;
+            if (bare_bone_search) {
+                flag_stop_search = candidate_dist > lowerBound;
+            } else {
+                if (stop_condition) {
+                    flag_stop_search = stop_condition->should_stop_search(candidate_dist, lowerBound);
+                } else {
+                    flag_stop_search = candidate_dist > lowerBound && top_candidates.size() == ef;
+                }
+            }
+            if (flag_stop_search) {
+                break;
+            }
+            candidate_set.pop();
+
+            tableint current_node_id = current_node_pair.second;
+            int *data = (int *) get_linklist0(current_node_id);
+            size_t size = getListCount((linklistsizeint*)data);
+//                bool cur_node_deleted = isMarkedDeleted(current_node_id);
+            if (collect_metrics) {
+                metric_hops++;
+                metric_distance_computations+=size;
+            }
+            size_t jj=0;
+            for (size_t j = 1; j <= size; j++) {
+              int candidate_id = *(data + j);
+              if (!(visited_array[candidate_id] == visited_array_tag)) {
+                    //visited_array[candidate_id] = visited_array_tag;
+                    char *currObj1 = (getDataByInternalId(candidate_id));
+                    //memcpy(mydata+(jj++)*(int32_t)dim*sizeof(dist_t),currObj1,dim*sizeof(dist_t));
+                    mydata[jj++]=currObj1;
+                    //printf("dim:%d\n",dim);
+              }
+            }
+            if(size>0) {
+              //printf("compuet dim:%d,size:%d\n",dim-1,size);
+               memset(res,0,sizeof(float)*jj);
+              //devided_batch_amx_inner_product((int8_t**)&data_point,(int8_t**)&mydata,dim,1,jj,res);
+              devided_batch_amx_inner_product_fp32((char**)mydata,(char*)data_point,dim,jj,1,(float*)res);
+              //compute_s8s8f32_inner_product(1,dim,jj,dim,(int8_t*)data_point,(int8_t*)mydata,(int8_t*)relay_out,(float*)res);
+              //compute_s8s8f32_inner_product(jj,dim,1,dim,(int8_t*)mydata,(int8_t*)data_point,(int8_t*)relay_out,(float*)res);
+            }
+
+            //printf("jj:%d\n",jj);
+            jj=0;
+            for (size_t j = 1; j <= size; j++) {
+                int candidate_id = *(data + j);
+
+//                    if (candidate_id == 0) continue;
+/* #ifdef USE_SSE
+                _mm_prefetch((char *) (visited_array + *(data + j + 1)), _MM_HINT_T0);
+                _mm_prefetch(data_level0_memory_ + (*(data + j + 1)) * size_data_per_element_ + offsetData_,
+                                _MM_HINT_T0);  ////////////
+#endif */
+                if (!(visited_array[candidate_id] == visited_array_tag)) {
+                    visited_array[candidate_id] = visited_array_tag;
+
+                    char *currObj1 = (getDataByInternalId(candidate_id));
+                    //dist_t dist = fstdistfunc_(data_point, currObj1, dist_func_param_);
+                    dist_t * myres= (dist_t *)res;
+                    dist_t dist=1.0f-(dist_t)myres[jj++];
+                    bool flag_consider_candidate;
+                    if (!bare_bone_search && stop_condition) {
+                        flag_consider_candidate = stop_condition->should_consider_candidate(dist, lowerBound);
+                    } else {
+                        flag_consider_candidate = top_candidates.size() < ef || lowerBound > dist;
+                    }
+
+                    if (flag_consider_candidate) {
+                        candidate_set.emplace(-dist, candidate_id);
+#ifdef USE_SSE
+                        _mm_prefetch(data_level0_memory_ + candidate_set.top().second * size_data_per_element_ +
+                                        offsetLevel0_,  ///////////
+                                        _MM_HINT_T0);  ////////////////////////
+#endif
+
+                        if (bare_bone_search || 
+                            (!isMarkedDeleted(candidate_id) && ((!isIdAllowed) || (*isIdAllowed)(getExternalLabel(candidate_id))))) {
+
+                            top_candidates.emplace(dist, candidate_id);
+                            if (!bare_bone_search && stop_condition) {
+                                stop_condition->add_point_to_result(getExternalLabel(candidate_id), currObj1, dist);
+                            }
+                        }
+
+                        bool flag_remove_extra = false;
+                        if (!bare_bone_search && stop_condition) {
+                            flag_remove_extra = stop_condition->should_remove_extra();
+                        } else {
+                            flag_remove_extra = top_candidates.size() > ef;
+                        }
+                        while (flag_remove_extra) {
+                            tableint id = top_candidates.top().second;
+                            top_candidates.pop();
+                            if (!bare_bone_search && stop_condition) {
+                                stop_condition->remove_point_from_result(getExternalLabel(id), getDataByInternalId(id), dist);
+                                flag_remove_extra = stop_condition->should_remove_extra();
+                            } else {
+                                flag_remove_extra = top_candidates.size() > ef;
+                            }
+                        }
+
+                        if (!top_candidates.empty())
+                            lowerBound = top_candidates.top().first;
+                    }
+                }
+            }
+        }
+
+        visited_list_pool_->releaseVisitedList(vl);
+        return top_candidates;
+    }
     // bare_bone_search means there is no check for deletions and stop condition is ignored in return of extra performance
     template <bool bare_bone_search = true, bool collect_metrics = false>
     std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst>
@@ -1120,6 +1438,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
     * If replacement of deleted elements is enabled: replaces previously deleted point if any, updating it with new point
     */
     void addPoint(const void *data_point, labeltype label, bool replace_deleted = false) {
+      
         if ((allow_replace_deleted_ == false) && (replace_deleted == true)) {
             throw std::runtime_error("Replacement of deleted elements is disabled in constructor");
         }
@@ -1454,9 +1773,117 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
         size_t dim=(size_t)(*(size_t *)dist_func_param_);
         if(mydata==NULL){
           mydata=(void**)malloc(sizeof(dist_t*)*maxM0_);
-          relay_out=(void*)malloc(sizeof(dist_t)*maxM0_*dim);
           res=(int32_t*) malloc(maxM0_*sizeof(int32_t)); 
           memset(res,0,maxM0_*sizeof(int32_t));  
+          //printf("We are 1443lines\n");
+        }
+
+        
+        //memset(mydata,0,sizeof(dist_t)*maxM_*dim);
+
+        for (int level = maxlevel_; level > 0; level--) {
+            bool changed = true;
+            while (changed) {
+                changed = false;
+                unsigned int *data;
+
+                data = (unsigned int *) get_linklist(currObj, level);
+                int size = getListCount(data);
+                metric_hops++;
+                metric_distance_computations+=size;
+
+                tableint *datal = (tableint *) (data + 1);
+                if (size > 8){
+                  for (int i= 0; i<size;i++){
+                    tableint cand = datal[i];
+                    void* curData=getDataByInternalId(cand);
+                    mydata[i] = curData;
+ 
+/*                     _mm_prefetch((char *) (mydata[i])+0, _MM_HINT_T0);
+                    _mm_prefetch((char *) (mydata[i])+64, _MM_HINT_T0);
+                    _mm_prefetch((char *) (mydata[i])+128, _MM_HINT_T0); */
+                    //memcpy(mydata+i*dim*sizeof(dist_t),curData,dim*sizeof(dist_t));
+                  }
+/*                   int32_t scalar_result[32]={0};
+                    for(int i=0;i<size;i++){
+                        scalar_result[i]+=vector_dot_product_int32_t((void*)query_data,(void*)mydata[i],dist_func_param_);
+                    }  */
+                    //memset(res,0,sizeof(int32_t)*size);
+                    devided_batch_amx_inner_product_int8((int8_t**)mydata,(int8_t**)&query_data,dim,size,1,(int32_t*)res);
+/*                      for(int i=0;i<size;i++){
+                      printf("id:%d scalar:%d amx:%d\n",i,scalar_result[i],((int32_t*)res)[i]);
+                    }   */
+                  int32_t *myres= (int32_t *) res;
+                  for (int i = 0; i < size; i++) {
+                    dist_t d=1-(dist_t)myres[i];
+
+                    //printf("%f ",(float) myres[i]);
+                    if(d < curdist) {
+                      curdist=d;
+                      currObj=datal[i];
+                      changed = true;
+                    }
+                  }
+                }else {
+                  for (int i = 0; i < size; i++) {
+                      tableint cand = datal[i];
+                      if (cand < 0 || cand > max_elements_)
+                          throw std::runtime_error("cand error");
+                      dist_t d = fstdistfunc_(query_data, getDataByInternalId(cand), dist_func_param_);
+
+                      if (d < curdist) {
+                          curdist = d;
+                          currObj = cand;
+                          changed = true;
+                      }
+                  }
+                }
+            }
+        }
+
+        std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
+        bool bare_bone_search = !num_deleted_ && !isIdAllowed;
+        if (bare_bone_search) {
+            top_candidates = searchBaseLayerSTAMX<true>(
+                    currObj, query_data, std::max(ef_, k), isIdAllowed);
+        } else {
+            top_candidates = searchBaseLayerSTAMX<false>(
+                    currObj, query_data, std::max(ef_, k), isIdAllowed);
+        }
+
+        while (top_candidates.size() > k) {
+            top_candidates.pop();
+        }
+        while (top_candidates.size() > 0) {
+            std::pair<dist_t, tableint> rez = top_candidates.top();
+            result.push(std::pair<dist_t, labeltype>(rez.first, getExternalLabel(rez.second)));
+            top_candidates.pop();
+        }
+        return result;
+    }
+    std::priority_queue<std::pair<dist_t, labeltype >>
+    searchKnnAMX_bf16(const void *query_data, size_t k, BaseFilterFunctor* isIdAllowed = nullptr) const {
+
+        int cr0=get_amx_xcr_reg();
+        if (!enable_amx()){
+          std::cerr << "Kernel doesn't support AMX! Exit..." << std::endl;
+          exit(1);
+        }
+
+        std::priority_queue<std::pair<dist_t, labeltype >> result;
+        if (cur_element_count == 0) return result;
+
+        tableint currObj = enterpoint_node_;
+
+        //printf("%lld %d %d\n",data_level0_memory_ + enterpoint_node_ * size_data_per_element_ + offsetData_, size_data_per_element_, offsetData_);
+        dist_t curdist = fstdistfunc_(query_data, getDataByInternalId(enterpoint_node_), dist_func_param_);
+        
+        size_t dim=(size_t)(*(size_t *)dist_func_param_);
+        if(mydata==NULL){
+          mydata=(void**)malloc(sizeof(dist_t*)*maxM0_);
+          relay_out=(void*)malloc(sizeof(dist_t)*maxM0_*dim);
+          res=(float*) malloc(maxM0_*sizeof(float)); 
+          memset(res,0,maxM0_*sizeof(float));  
           //printf("We are 1443lines\n");
         }
 
@@ -1480,24 +1907,26 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                   tableint cand = datal[i];
                   void* curData=getDataByInternalId(cand);
                   mydata[i] = curData;
-                  //memcpy(mydata+i*dim*sizeof(dist_t),curData,dim*sizeof(dist_t));
                 }
 
                 if (size > 0){
-/*                   int32_t scalar_result[32]={0};
-                  for(int i=0;i<size;i++){
-                      scalar_result[i]+=vector_dot_product_int32_t((void*)query_data,(void*)mydata[i],dist_func_param_);
-                  }  */
-                   memset(res,0,sizeof(int32_t)*size);
-                  devided_batch_amx_inner_product((int8_t**)mydata,(int8_t**)&query_data,dim,size,1,res);
-/*                    for(int i=0;i<size;i++){
-                    printf("id:%d scalar:%d amx:%d\n",i,scalar_result[i],res[i]);
-                  }   */
-                  //compute_s8s8f32_inner_product(1,dim,size,dim,(int8_t*)query_data,(int8_t*)mydata,(int8_t*)relay_out,res);
-                  //compute_s8s8f32_inner_product(size,dim,1,dim,(int8_t*)mydata,(int8_t*)query_data,(int8_t*)relay_out,(float*)res);
+                   float scalar_result[32]={0};
+/*                   for(int i=0;i<size;i++){
+                    for(int j=0;j<dim;j++){
+                      //printf("id:%d query:%f my:%f\n",i,((float *)query_data)[j],((float **)(mydata))[i][j]);
+                      scalar_result[i]+=((float *)query_data)[j]*((float **)(mydata))[i][j];
+                    }
+                     // scalar_result[i]+=vector_dot_product_int32_t((void*)query_data,(void*)mydata[i],dist_func_param_);
+                  }  */ 
+                  memset(res,0,sizeof(float)*size);
+                  devided_batch_amx_inner_product((char**)mydata,(char*)query_data,dim,size,1,(float*)res);
+/*                   for(int i=0;i<size;i++){
+                    printf("id:%d scalar:%f amx:%f\n",i,scalar_result[i],((float*)res)[i]);
+                  }  */ 
                 }
+                dist_t *myres= (dist_t *) res;
                 for (int i = 0; i < size; i++) {
-                  float d=res[i];
+                  dist_t d=1.0f-(dist_t)myres[i];
                   if(d < curdist) {
                     curdist=d;
                     currObj=datal[i];
@@ -1522,10 +1951,10 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
         std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
         bool bare_bone_search = !num_deleted_ && !isIdAllowed;
         if (bare_bone_search) {
-            top_candidates = searchBaseLayerSTAMX<true>(
+            top_candidates = searchBaseLayerSTAMX_bf16<true>(
                     currObj, query_data, std::max(ef_, k), isIdAllowed);
         } else {
-            top_candidates = searchBaseLayerSTAMX<false>(
+            top_candidates = searchBaseLayerSTAMX_bf16<false>(
                     currObj, query_data, std::max(ef_, k), isIdAllowed);
         }
 
@@ -1539,7 +1968,113 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
         }
         return result;
     }
+    std::priority_queue<std::pair<dist_t, labeltype >>
+    searchKnnAMX_fp32(const void *query_data, size_t k, BaseFilterFunctor* isIdAllowed = nullptr) const {
 
+        int cr0=get_amx_xcr_reg();
+        if (!enable_amx()){
+          std::cerr << "Kernel doesn't support AMX! Exit..." << std::endl;
+          exit(1);
+        }
+
+        std::priority_queue<std::pair<dist_t, labeltype >> result;
+        if (cur_element_count == 0) return result;
+
+        tableint currObj = enterpoint_node_;
+
+        //printf("%lld %d %d\n",data_level0_memory_ + enterpoint_node_ * size_data_per_element_ + offsetData_, size_data_per_element_, offsetData_);
+        dist_t curdist = fstdistfunc_(query_data, getDataByInternalId(enterpoint_node_), dist_func_param_);
+        
+        size_t dim=(size_t)(*(size_t *)dist_func_param_);
+        if(mydata==NULL){
+          mydata=(void**)malloc(sizeof(dist_t*)*maxM0_);
+          relay_out=(void*)malloc(sizeof(dist_t)*maxM0_*dim);
+          res=(float*) malloc(maxM0_*sizeof(float)); 
+          memset(res,0,maxM0_*sizeof(float));  
+          //printf("We are 1443lines\n");
+        }
+
+        
+        //memset(mydata,0,sizeof(dist_t)*maxM_*dim);
+
+        for (int level = maxlevel_; level > 0; level--) {
+            bool changed = true;
+            while (changed) {
+                changed = false;
+                unsigned int *data;
+
+                data = (unsigned int *) get_linklist(currObj, level);
+                int size = getListCount(data);
+                metric_hops++;
+                metric_distance_computations+=size;
+
+                tableint *datal = (tableint *) (data + 1);
+
+                for (int i= 0; i<size;i++){
+                  tableint cand = datal[i];
+                  void* curData=getDataByInternalId(cand);
+                  mydata[i] = curData;
+                }
+
+                if (size > 0){
+                  float scalar_result[32]={0};
+/*                   for(int i=0;i<size;i++){
+                    for(int j=0;j<dim;j++){
+                      //printf("id:%d query:%f my:%f\n",i,((float *)query_data)[j],((float **)(mydata))[i][j]);
+                      scalar_result[i]+=((float *)query_data)[j]*((float **)(mydata))[i][j];
+                    }
+                     // scalar_result[i]+=vector_dot_product_int32_t((void*)query_data,(void*)mydata[i],dist_func_param_);
+                  }   */
+                  memset(res,0,sizeof(float)*size);
+                  devided_batch_amx_inner_product_fp32((char**)mydata,(char*)query_data,dim,size,1,(float*)res);
+/*                   for(int i=0;i<size;i++){
+                    printf("id:%d scalar:%f amx:%f\n",i,scalar_result[i],((float*)res)[i]);
+                  }  */  
+                }
+                dist_t *myres= (dist_t *) res;
+                for (int i = 0; i < size; i++) {
+                  dist_t d=1.0f-(dist_t)myres[i];
+                  if(d < curdist) {
+                    curdist=d;
+                    currObj=datal[i];
+                    changed = true;
+                  }
+                }
+                /* for (int i = 0; i < size; i++) {
+                    tableint cand = datal[i];
+                    if (cand < 0 || cand > max_elements_)
+                        throw std::runtime_error("cand error");
+                    dist_t d = fstdistfunc_(query_data, getDataByInternalId(cand), dist_func_param_);
+
+                    if (d < curdist) {
+                        curdist = d;
+                        currObj = cand;
+                        changed = true;
+                    }
+                } */
+            }
+        }
+
+        std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
+        bool bare_bone_search = !num_deleted_ && !isIdAllowed;
+        if (bare_bone_search) {
+            top_candidates = searchBaseLayerSTAMX_fp32<true>(
+                    currObj, query_data, std::max(ef_, k), isIdAllowed);
+        } else {
+            top_candidates = searchBaseLayerSTAMX_fp32<false>(
+                    currObj, query_data, std::max(ef_, k), isIdAllowed);
+        }
+
+        while (top_candidates.size() > k) {
+            top_candidates.pop();
+        }
+        while (top_candidates.size() > 0) {
+            std::pair<dist_t, tableint> rez = top_candidates.top();
+            result.push(std::pair<dist_t, labeltype>(rez.first, getExternalLabel(rez.second)));
+            top_candidates.pop();
+        }
+        return result;
+    }
 
     std::priority_queue<std::pair<dist_t, labeltype >>
     searchKnn(const void *query_data, size_t k, BaseFilterFunctor* isIdAllowed = nullptr) const {

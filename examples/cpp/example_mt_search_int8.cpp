@@ -130,7 +130,85 @@ static float vector_dot_product_bf16(const void* a, const void* b, const void *q
     return 1-dot_product;
 }
 
+static float amx_inner_product_matrix_int8_2( const void* a, const void* b, const void *qty_ptr){
 
+  int8_t *libraryMatrix=(int8_t *)a;
+  int8_t *queryMatrix=(int8_t *)b;
+
+  size_t dims= *(size_t *)qty_ptr;
+  int DIM=64;
+  int blockCount=(dims)/DIM;
+  int tailCount=dims%DIM;
+  thread_local unsigned char *maInt8,*mbTemp=NULL;
+  thread_local bool init_mem=false;
+  thread_local char cfg[64]={0};
+
+  thread_local int8_t *preQuery=NULL;
+
+  thread_local int32_t result[256]={0};
+
+
+
+  if(!init_mem){
+    if(maInt8) free(maInt8);
+    maInt8 = (unsigned char*) aligned_alloc (64,sizeof(char)*DIM*16);
+    mbTemp = (unsigned char*) aligned_alloc (64,sizeof(char)*DIM*16);
+
+    cfg[0]=1;
+    //0
+    cfg[16]=64;
+    cfg[48] = DIM/4;
+
+    //1
+    cfg[16+1*2] = 16*2*2;   // col = N*4
+    cfg[48+1]   = DIM/4;   // row = K/4
+    //2
+    cfg[16+2*2] = 16*2*2;; // N*sizeof(int32)
+    cfg[48+2] = DIM/4;
+    //3
+    cfg[22]=  16*2*2;;
+    cfg[51] =  DIM/4;  // row->M
+    
+    //4
+    cfg[24] =  (16*4);   // col = N*4
+    cfg[52]   = 16;   // row = K/4
+    //5
+    cfg[26]=(16*4);;
+    cfg[53] = 16;  // row->M
+    //6
+    cfg[28] = (16*4);;   // col = N*4
+    cfg[54]   = 16;   // row = K/4
+
+    _tile_loadconfig((void*)cfg); 
+    init_mem=true;
+
+
+  } 
+  if(queryMatrix!=preQuery){
+    int  KPACK=4;
+    for (int j = 0; j < 16; j++) {
+      for (int k = 0; k < DIM; k++) {
+        *((char*)(mbTemp+(k/KPACK*16*KPACK+j*KPACK+k%KPACK))) = *((char*)(queryMatrix+(j*DIM+k)));
+      }
+    }
+     _tile_loadd(0, mbTemp, 64);
+     preQuery=queryMatrix;
+  }
+
+
+      //_mm_prefetch((char *) (libraryMatrix[j+4]), _MM_HINT_T0);
+  _tile_loadd(1,libraryMatrix,64);
+
+  _tile_dpbuud(4, 1, 0);
+
+  _tile_stored(4, result, 16*2*2);
+  int32_t res=0;
+  for(int k = 0; k < 16; k++){
+      res+=result[k*17];
+  }
+  _tile_zero(4);
+  return res;
+}
 static float fvec_inner_product_int8_avx2int8(const void* a, const void* b, const void *qty_ptr) {
   //exit(-1);
   const uint8_t* pvec_u8 = (const uint8_t*)a;
@@ -218,7 +296,16 @@ class Bf16InnerProductSpace : public hnswlib::SpaceInterface<float> {
     }
     ~Bf16InnerProductSpace() {}
 };
+void setThreadAffinity(std::thread::native_handle_type handle, size_t cpuId) {
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(cpuId, &cpuset);
 
+    int rc = pthread_setaffinity_np(handle, sizeof(cpuset), &cpuset);
+    if (rc != 0) {
+        throw std::system_error(rc, std::generic_category(), "pthread_setaffinity_np");
+    }
+}
 
 template<class Function>
 inline void ParallelFor(size_t start, size_t end, size_t numThreads, Function fn) {
@@ -244,6 +331,7 @@ inline void ParallelFor(size_t start, size_t end, size_t numThreads, Function fn
 
         for (size_t threadId = 0; threadId < numThreads; ++threadId) {
             threads.push_back(std::thread([&, threadId] {
+                setThreadAffinity(pthread_self(), threadId);
                 while (true) {
                     size_t id = current.fetch_add(1);
 
@@ -280,7 +368,7 @@ inline void ParallelFor(size_t start, size_t end, size_t numThreads, Function fn
 int call_scalar_int8(hnswlib::HierarchicalNSW<float>* alg_hnsw,Int8InnerProductSpace & space,float* data,int dim, int max_elements,int top_k,int num_threads){
     std::vector<hnswlib::labeltype> neighbors(max_elements);
     ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
-        std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnn(data + dim * row, 1);
+        std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnn(data + dim * row, top_k);
         hnswlib::labeltype label = result.top().second;
         neighbors[row] = label;
     });
@@ -304,7 +392,7 @@ int call_AMX_int8(hnswlib::HierarchicalNSW<float>* alg_hnsw,Int8InnerProductSpac
     //init_onednn();
     std::vector<hnswlib::labeltype> neighbors(max_elements);
     ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
-        std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnnAMX(data + dim * row, 1);
+        std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnnAMX(data + dim * row, top_k);
         hnswlib::labeltype label = result.top().second;
         neighbors[row] = label;
     });
@@ -327,7 +415,7 @@ int call_AMX_int8(hnswlib::HierarchicalNSW<float>* alg_hnsw,Int8InnerProductSpac
 int call_scalar_bf16(hnswlib::HierarchicalNSW<float>* alg_hnsw,Bf16InnerProductSpace& space,float* data,int dim, int max_elements,int top_k,int num_threads){
     std::vector<hnswlib::labeltype> neighbors(max_elements);
     ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
-        std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnn(data + dim * row, 1);
+        std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnn(data + dim * row, top_k);
         hnswlib::labeltype label = result.top().second;
         neighbors[row] = label;
     });
@@ -345,7 +433,7 @@ int call_AMX_bf16(hnswlib::HierarchicalNSW<float>* alg_hnsw,Bf16InnerProductSpac
     //init_onednn();
     std::vector<hnswlib::labeltype> neighbors(max_elements);
     ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
-        std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnnAMX_bf16(data + dim * row, 1);
+        std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnnAMX_bf16(data + dim * row, top_k);
         hnswlib::labeltype label = result.top().second;
         neighbors[row] = label;
     });
@@ -359,7 +447,7 @@ int call_AMX_bf16(hnswlib::HierarchicalNSW<float>* alg_hnsw,Bf16InnerProductSpac
     return 0;
 }
 int main() {
-    int true_dim=2048;
+    int true_dim=64;
     int dim = true_dim/4;               // Dimension of the elements
     int max_elements = 100*1024;   // Maximum number of elements, should be known beforehand
     int M = 32;                 // Tightly connected with internal dimensionality of the data
@@ -380,7 +468,7 @@ int main() {
     // Generate random data
     std::mt19937 rng;
     rng.seed(47);
-    std::uniform_int_distribution<> distrib_int8(0, 1);
+    std::uniform_int_distribution<> distrib_int8(0, 80);
     float* data = new float[dim * max_elements];
     float* queries = new float[dim*nq];
 
