@@ -331,7 +331,7 @@ inline void ParallelFor(size_t start, size_t end, size_t numThreads, Function fn
 
         for (size_t threadId = 0; threadId < numThreads; ++threadId) {
             threads.push_back(std::thread([&, threadId] {
-                setThreadAffinity(pthread_self(), threadId);
+                //setThreadAffinity(pthread_self(), threadId);
                 while (true) {
                     size_t id = current.fetch_add(1);
 
@@ -396,7 +396,7 @@ int call_AMX_int8(hnswlib::HierarchicalNSW<float>* alg_hnsw,Int8InnerProductSpac
         hnswlib::labeltype label = result.top().second;
         neighbors[row] = label;
     });
-/*     for(int row=0; row< max_elements;row++){
+/*  for(int row=0; row< max_elements;row++){
         std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnnAMX(data + dim * row, 1);
         hnswlib::labeltype label = result.top().second;
         neighbors[row] = label;
@@ -447,18 +447,18 @@ int call_AMX_bf16(hnswlib::HierarchicalNSW<float>* alg_hnsw,Bf16InnerProductSpac
     return 0;
 }
 int main() {
-    int true_dim=64;
+    int true_dim=384*4;
     int dim = true_dim/4;               // Dimension of the elements
     int max_elements = 100*1024;   // Maximum number of elements, should be known beforehand
     int M = 32;                 // Tightly connected with internal dimensionality of the data
     int nq = max_elements;
                                 // strongly affects the memory consumption
     int ef_construction = 200;  // Controls index search speed/build speed tradeoff
-    int num_threads = 32;       // Number of threads for operations with index
+    int num_threads = 1;       // Number of threads for operations with index
 
     int top_k=1;
 
-    int iteration=3;
+    int iteration=3000;
 
   
     // Initing index

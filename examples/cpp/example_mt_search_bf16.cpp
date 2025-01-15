@@ -382,10 +382,10 @@ int call_AMX_bf16(hnswlib::HierarchicalNSW<float>* alg_hnsw,Bf16InnerProductSpac
     return 0;
 }
 int main() {
-    int true_dim=64;
+    int true_dim=1024;
     int dim = true_dim/2;               // Dimension of the elements
     int max_elements = 100*1024;   // Maximum number of elements, should be known beforehand
-    int M = 32;                 // Tightly connected with internal dimensionality of the data
+    int M = 16;                 // Tightly connected with internal dimensionality of the data
     int nq = max_elements;
                                 // strongly affects the memory consumption
     int ef_construction = 200;  // Controls index search speed/build speed tradeoff

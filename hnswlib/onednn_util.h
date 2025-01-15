@@ -308,22 +308,22 @@ float amx_inner_product_matrix_int8_1( int8_t **libraryMatrix, int8_t *queryMatr
     init_mem=true;
   }
   
-  memset(ma1Int8,0,16*DIM);  
+  //memset(ma1Int8,0,16*DIM);  
 
   __m512i sa;
   for(int i=0;i<blockCount;i++){
     for(int j=0;j<batchSizeA;j++){
-      sa=_mm512_loadu_si512(libraryMatrix[j]+i*blockDim);
+      sa=_mm512_load_si512(libraryMatrix[j]+i*blockDim);
       _mm512_store_si512(ma1Int8+j*DIM,sa);
-      sa=_mm512_loadu_si512(libraryMatrix[j]+i*blockDim+64);
+      sa=_mm512_load_si512(libraryMatrix[j]+i*blockDim+64);
       _mm512_store_si512(ma2Int8+j*DIM,sa);
-      sa=_mm512_loadu_si512(libraryMatrix[j]+i*blockDim+128);
+      sa=_mm512_load_si512(libraryMatrix[j]+i*blockDim+128);
       _mm512_store_si512(ma3Int8+j*DIM,sa);
-      sa=_mm512_loadu_si512(libraryMatrix[j]+i*blockDim+192);
+      sa=_mm512_load_si512(libraryMatrix[j]+i*blockDim+192);
       _mm512_store_si512(ma4Int8+j*DIM,sa);
-      sa=_mm512_loadu_si512(libraryMatrix[j]+i*blockDim+256);
+      sa=_mm512_load_si512(libraryMatrix[j]+i*blockDim+256);
       _mm512_store_si512(ma5Int8+j*DIM,sa);
-      sa=_mm512_loadu_si512(libraryMatrix[j]+i*blockDim+320);
+      sa=_mm512_load_si512(libraryMatrix[j]+i*blockDim+320);
       _mm512_store_si512(ma6Int8+j*DIM,sa);
     }
 
@@ -506,13 +506,20 @@ float amx_inner_product_matrix_int8( int8_t **libraryMatrix, int8_t *queryMatrix
 /*   memset(ma1Int8,0,16*DIM);  
   memset(ma2Int8,0,16*DIM); 
   memset(ma3Int8,0,16*DIM);   */
+
+  // for(auto j=0;j<batchSizeA;j++){
+  //   _mm_prefetch(libraryMatrix[j], _MM_HINT_T0);  
+  // }
   for(int i=0;i<blockCount;i++){
 
     //int32_t stride=i*DIM;
     __m512i sa;
     size_t offset = i * blockDim;
     
+
+    
     for(int j=0;j<batchSizeA;j++){  
+      
       size_t destOffset1 = j * DIM;
       _mm512_store_si512(ma1Int8 + destOffset1, _mm512_loadu_si512(libraryMatrix[j] + offset));
       _mm512_store_si512(ma2Int8 + destOffset1, _mm512_loadu_si512(libraryMatrix[j] + offset + 64));
@@ -549,7 +556,7 @@ float amx_inner_product_matrix_int8( int8_t **libraryMatrix, int8_t *queryMatrix
   if(tailCount!=0){
     for(int k=0;k<batchSizeA;k++){
       for(int l=0;l<batchSizeB;l++){
-        results[k*batchSizeB+l]+=(float)fvec_inner_product_int8_avx2int8_tail(libraryMatrix[k]+(dims/DIM)*DIM,queryMatrix+l*dims+(dims/DIM)*DIM,&tailCount);
+        results[k*batchSizeB+l]+=(int32_t)vector_dot_product_int32_t(libraryMatrix[k]+(dims/DIM)*DIM,queryMatrix+l*dims+(dims/DIM)*DIM,&tailCount);
       }
     }
   }
@@ -561,7 +568,7 @@ float amx_inner_product_matrix_int8_2( int8_t **libraryMatrix, int8_t *queryMatr
   int DIM=64;
   int blockCount=(dims)/DIM;
   int tailCount=dims%DIM;
-  thread_local unsigned char *maInt8,*mbTemp=NULL;
+  thread_local unsigned char *maInt8,*mbTemp=NULL,*mbInt8;
   thread_local bool init_mem=false;
   thread_local char cfg[64]={0};
 
@@ -609,9 +616,9 @@ float amx_inner_product_matrix_int8_2( int8_t **libraryMatrix, int8_t *queryMatr
     int  KPACK=4;
     for (int j = 0; j < 16; j++) {
       for (int k = 0; k < DIM; k++) {
-        int8_t tmp =125 ;
+        int8_t tmp =125;
 
-        *((char*)(mbTemp+(k/KPACK*16*KPACK+j*KPACK+k%KPACK))) = *((char*)(queryMatrix+(j*DIM+k)));
+        *((char*)(mbTemp+(k/KPACK*16*KPACK+j*KPACK+k%KPACK))) = *((int8_t*)(mbInt8+(j*DIM+k)));
         //std::cout<<(int32_t)queryMatrix[j*DIM+k]<<" ";
         //*((char*)(mbTemp+(k/KPACK*16*KPACK+j*KPACK+k%KPACK))) = *((char*)&tmp);
       }
@@ -1094,10 +1101,17 @@ float amx_inner_product_matrix_fp32( char **floatLibraryMatrix, char  *floatQuer
     int tailCount=dims%DIM;
     unsigned char maBf16[1024] __attribute__((aligned(64)));
     unsigned char mbBf16[1024] __attribute__((aligned(64)));
+
+    //thread_local unsigned char *mbBf16=NULL;
+    thread_local char *preQuery=NULL;
     thread_local char cfg[64]={0};
     thread_local bool init_mem=false;
  
     if(!init_mem){
+
+/*         if(!mbBf16){
+          mbBf16 =(unsigned char *)aligned_alloc(64,sizeof(char)*dims*4);
+        } */
         cfg[0]=1;
         cfg[16]=DIM*2;
         cfg[48] = 16;  // row->M
@@ -1143,6 +1157,16 @@ float amx_inner_product_matrix_fp32( char **floatLibraryMatrix, char  *floatQuer
       _tile_dpbf16ps(2,0,1);
 
     } */
+
+/*     if(preQuery!=floatQueryMatrix){
+      preQuery=floatQueryMatrix;
+      for(int i=0;i<dims/DIM;i++){
+        high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatQueryMatrix +  i * DIM * 4),16);
+        low_bits = _mm512_loadu_si512(floatQueryMatrix +  i * DIM * 4 + 64);
+        all_bits= _mm512_mask_blend_epi16(0x55555555,low_bits , high_bits);
+        _mm512_store_si512(mbBf16+i*64 , all_bits);
+      }
+    } */
     int i=0;
     for( i = 0; i < blockCount/3; i+=1) {
         int index=3*i;
@@ -1159,7 +1183,7 @@ float amx_inner_product_matrix_fp32( char **floatLibraryMatrix, char  *floatQuer
         _mm512_store_si512(mbBf16 , all_bits);
 
         _tile_loadd(0,maBf16, 64);
-        _tile_loadd(1,mbBf16, 4);
+        _tile_loadd(1,mbBf16 , 4);
 
         for(int j = 0; j < batchSizeA; j++) {
           high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatLibraryMatrix[j] +  (index+1) * DIM * 4),16);
@@ -1174,7 +1198,7 @@ float amx_inner_product_matrix_fp32( char **floatLibraryMatrix, char  *floatQuer
         _mm512_store_si512(mbBf16 , all_bits);
 
         _tile_loadd(3,maBf16, 64);
-        _tile_loadd(4,mbBf16, 4);
+        _tile_loadd(4,mbBf16 , 4);
 
         for(int j = 0; j < batchSizeA; j++) {
           high_bits = _mm512_srli_epi32(_mm512_loadu_si512(floatLibraryMatrix[j] +  (index+2) * DIM * 4),16);
@@ -1189,7 +1213,7 @@ float amx_inner_product_matrix_fp32( char **floatLibraryMatrix, char  *floatQuer
         _mm512_store_si512(mbBf16 , all_bits);
 
         _tile_loadd(5,maBf16, 64);
-        _tile_loadd(6,mbBf16, 4);
+        _tile_loadd(6,mbBf16 , 4);
 
         _tile_dpbf16ps(2,0,1);  
         _tile_dpbf16ps(2,3,4);

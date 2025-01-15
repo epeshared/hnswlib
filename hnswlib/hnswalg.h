@@ -275,19 +275,22 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
             }
             size_t size = getListCount((linklistsizeint*)data);
             tableint *datal = (tableint *) (data + 1);
-#ifdef USE_SSE
-            _mm_prefetch((char *) (visited_array + *(data + 1)), _MM_HINT_T0);
-            _mm_prefetch((char *) (visited_array + *(data + 1) + 64), _MM_HINT_T0);
+//#define USE_PREFETCH           
+#if defined (USE_SSE) and defined (USE_PREFETCH)
+            int prefetch_step=1;
+            //printf("we are here");
+            _mm_prefetch((char *) (visited_array + *(data + prefetch_step)), _MM_HINT_T0);
+            _mm_prefetch((char *) (visited_array + *(data + prefetch_step) + 64), _MM_HINT_T0);
             _mm_prefetch(getDataByInternalId(*datal), _MM_HINT_T0);
-            _mm_prefetch(getDataByInternalId(*(datal + 1)), _MM_HINT_T0);
+            _mm_prefetch(getDataByInternalId(*(datal + prefetch_step)), _MM_HINT_T0);
 #endif
 
             for (size_t j = 0; j < size; j++) {
                 tableint candidate_id = *(datal + j);
 //                    if (candidate_id == 0) continue;
-#ifdef USE_SSE
-                _mm_prefetch((char *) (visited_array + *(datal + j + 1)), _MM_HINT_T0);
-                _mm_prefetch(getDataByInternalId(*(datal + j + 1)), _MM_HINT_T0);
+#if defined (USE_SSE) and defined (USE_PREFETCH)
+                _mm_prefetch((char *) (visited_array + *(datal + j + prefetch_step)), _MM_HINT_T0);
+                _mm_prefetch(getDataByInternalId(*(datal + j + prefetch_step)), _MM_HINT_T0);
 #endif
                 if (visited_array[candidate_id] == visited_array_tag) continue;
                 visited_array[candidate_id] = visited_array_tag;
@@ -296,7 +299,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                 dist_t dist1 = fstdistfunc_(data_point, currObj1, dist_func_param_);
                 if (top_candidates.size() < ef_construction_ || lowerBound > dist1) {
                     candidateSet.emplace(-dist1, candidate_id);
-#ifdef USE_SSE
+#if defined (USE_SSE) and defined (USE_PREFETCH)
                     _mm_prefetch(getDataByInternalId(candidateSet.top().second), _MM_HINT_T0);
 #endif
 
