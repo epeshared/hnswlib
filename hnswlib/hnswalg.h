@@ -856,19 +856,21 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                 metric_distance_computations+=size;
             }
 
-#ifdef USE_SSE
-            _mm_prefetch((char *) (visited_array + *(data + 1)), _MM_HINT_T0);
-            _mm_prefetch((char *) (visited_array + *(data + 1) + 64), _MM_HINT_T0);
-            _mm_prefetch(data_level0_memory_ + (*(data + 1)) * size_data_per_element_ + offsetData_, _MM_HINT_T0);
-            _mm_prefetch((char *) (data + 2), _MM_HINT_T0);
+#define USE_PREFETCH           
+#if defined (USE_SSE) and defined (USE_PREFETCH)
+            int step=1;
+            _mm_prefetch((char *) (visited_array + *(data + step)), _MM_HINT_T0);
+            _mm_prefetch((char *) (visited_array + *(data + step) + 64), _MM_HINT_T0);
+            _mm_prefetch(data_level0_memory_ + (*(data + step)) * size_data_per_element_ + offsetData_, _MM_HINT_T0);
+            _mm_prefetch((char *) (data + step + 1), _MM_HINT_T0);
 #endif
 
             for (size_t j = 1; j <= size; j++) {
                 int candidate_id = *(data + j);
 //                    if (candidate_id == 0) continue;
-#ifdef USE_SSE
-                _mm_prefetch((char *) (visited_array + *(data + j + 1)), _MM_HINT_T0);
-                _mm_prefetch(data_level0_memory_ + (*(data + j + 1)) * size_data_per_element_ + offsetData_,
+#if defined (USE_SSE) and defined (USE_PREFETCH)
+                _mm_prefetch((char *) (visited_array + *(data + j + step)), _MM_HINT_T0);
+                _mm_prefetch(data_level0_memory_ + (*(data + j + step)) * size_data_per_element_ + offsetData_,
                                 _MM_HINT_T0);  ////////////
 #endif
                 if (!(visited_array[candidate_id] == visited_array_tag)) {
@@ -886,7 +888,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
 
                     if (flag_consider_candidate) {
                         candidate_set.emplace(-dist, candidate_id);
-#ifdef USE_SSE
+#if defined (USE_SSE) and defined (USE_PREFETCH)
                         _mm_prefetch(data_level0_memory_ + candidate_set.top().second * size_data_per_element_ +
                                         offsetLevel0_,  ///////////
                                         _MM_HINT_T0);  ////////////////////////

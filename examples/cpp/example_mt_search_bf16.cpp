@@ -219,6 +219,73 @@ class Bf16InnerProductSpace : public hnswlib::SpaceInterface<float> {
     ~Bf16InnerProductSpace() {}
 };
 
+void setThreadAffinity(std::thread::native_handle_type handle, size_t cpuId) {
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(cpuId, &cpuset);
+
+    int rc = pthread_setaffinity_np(handle, sizeof(cpuset), &cpuset);
+    if (rc != 0) {
+        throw std::system_error(rc, std::generic_category(), "pthread_setaffinity_np");
+    }
+}
+template<class Function>
+inline void ParallelFor_Build(size_t start, size_t end, size_t numThreads, Function fn) {
+    if (numThreads <= 0) {
+        numThreads = std::thread::hardware_concurrency();
+    }
+
+    if (numThreads == 1) {
+        for (size_t id = start; id < end; id++) {
+            fn(id, 0);
+        }
+    } else {
+        std::vector<std::thread> threads;
+        std::atomic<size_t> current(start);
+
+        // keep track of exceptions in threads
+        // https://stackoverflow.com/a/32428427/1713196
+        std::exception_ptr lastException = nullptr;
+        std::mutex lastExceptMutex;
+
+
+        int dimSizeperThread = (end-start)/numThreads;
+
+        for (size_t threadId = 0; threadId < numThreads; ++threadId) {
+            threads.push_back(std::thread([&, threadId] {
+                setThreadAffinity(pthread_self(), threadId);
+                while (true) {
+                    size_t id = current.fetch_add(1);
+
+                    if (id >= end) {
+                        break;
+                    }
+
+                    try {
+                        fn(id, threadId);
+                    } catch (...) {
+                        std::unique_lock<std::mutex> lastExcepLock(lastExceptMutex);
+                        lastException = std::current_exception();
+                        /*
+                         * This will work even when current is the largest value that
+                         * size_t can fit, because fetch_add returns the previous value
+                         * before the increment (what will result in overflow
+                         * and produce 0 instead of current + 1).
+                         */
+                        current = end;
+                        break;
+                    }
+                }
+            }));
+        }
+        for (auto &thread : threads) {
+            thread.join();
+        }
+        if (lastException) {
+            std::rethrow_exception(lastException);
+        }
+    }
+}
 
 template<class Function>
 inline void ParallelFor(size_t start, size_t end, size_t numThreads, Function fn) {
@@ -277,7 +344,7 @@ inline void ParallelFor(size_t start, size_t end, size_t numThreads, Function fn
     }
 }
 
-int call_scalar(hnswlib::HierarchicalNSW<int8_t>* alg_hnsw,Int8InnerProductSpace & space,int8_t* data,int dim, int max_elements,int top_k,int num_threads){
+int call_scalar(hnswlib::HierarchicalNSW<int8_t>* alg_hnsw,Int8InnerProductSpace & space,int8_t* data,int dim, size_t max_elements,int top_k,int num_threads){
     std::vector<hnswlib::labeltype> neighbors(max_elements);
     ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
         std::priority_queue<std::pair<int8_t, hnswlib::labeltype>> result = alg_hnsw->searchKnn(data + dim * row, 1);
@@ -294,7 +361,7 @@ int call_scalar(hnswlib::HierarchicalNSW<int8_t>* alg_hnsw,Int8InnerProductSpace
     return 0;
 }
 
-int call_AMX(hnswlib::HierarchicalNSW<int8_t>* alg_hnsw,Int8InnerProductSpace & space,int8_t* data,int dim, int max_elements,int top_k,int num_threads){
+int call_AMX(hnswlib::HierarchicalNSW<int8_t>* alg_hnsw,Int8InnerProductSpace & space,int8_t* data,int dim, size_t max_elements,int top_k,int num_threads){
     //init_onednn();
     std::vector<hnswlib::labeltype> neighbors(max_elements);
     ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
@@ -312,7 +379,7 @@ int call_AMX(hnswlib::HierarchicalNSW<int8_t>* alg_hnsw,Int8InnerProductSpace & 
     return 0;
 }
 
-int call_scalar_fp32(hnswlib::HierarchicalNSW<float>* alg_hnsw,hnswlib::InnerProductSpace& space,float* data,int dim, int max_elements,int top_k,int num_threads){
+int call_scalar_fp32(hnswlib::HierarchicalNSW<float>* alg_hnsw,hnswlib::InnerProductSpace& space,float* data,int dim, size_t max_elements,int top_k,int num_threads){
     std::vector<hnswlib::labeltype> neighbors(max_elements);
     ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
         std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnn(data + dim * row, top_k);
@@ -320,7 +387,7 @@ int call_scalar_fp32(hnswlib::HierarchicalNSW<float>* alg_hnsw,hnswlib::InnerPro
         neighbors[row] = label;
     });
     float correct = 0;
-    for (int i = 0; i < max_elements; i++) {
+    for (size_t i = 0; i < max_elements; i++) {
         hnswlib::labeltype label = neighbors[i];
         if (label == i) correct++;
     }
@@ -328,7 +395,7 @@ int call_scalar_fp32(hnswlib::HierarchicalNSW<float>* alg_hnsw,hnswlib::InnerPro
     std::cout << "Recall: " << recall << "\n";
     return 0;
 }
-int call_scalar_bf16(hnswlib::HierarchicalNSW<float>* alg_hnsw,Bf16InnerProductSpace& space,float* data,int dim, int max_elements,int top_k,int num_threads){
+int call_scalar_bf16(hnswlib::HierarchicalNSW<float>* alg_hnsw,Bf16InnerProductSpace& space,float* data,int dim, size_t max_elements,int top_k,int num_threads){
     std::vector<hnswlib::labeltype> neighbors(max_elements);
     ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
         std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnn(data + dim * row, 1);
@@ -346,7 +413,7 @@ int call_scalar_bf16(hnswlib::HierarchicalNSW<float>* alg_hnsw,Bf16InnerProductS
 }
 
 
-int call_AMX_fp32(hnswlib::HierarchicalNSW<float>* alg_hnsw,hnswlib::InnerProductSpace & space,float* data,int dim, int max_elements,int top_k,int num_threads){
+int call_AMX_fp32(hnswlib::HierarchicalNSW<float>* alg_hnsw,hnswlib::InnerProductSpace & space,float* data,int dim, size_t max_elements,int top_k,int num_threads){
     //init_onednn();
     std::vector<hnswlib::labeltype> neighbors(max_elements);
     ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
@@ -364,7 +431,7 @@ int call_AMX_fp32(hnswlib::HierarchicalNSW<float>* alg_hnsw,hnswlib::InnerProduc
     return 0;
 }
 
-int call_AMX_bf16(hnswlib::HierarchicalNSW<float>* alg_hnsw,Bf16InnerProductSpace & space,float* data,int dim, int max_elements,int top_k,int num_threads){
+int call_AMX_bf16(hnswlib::HierarchicalNSW<float>* alg_hnsw,Bf16InnerProductSpace & space,float* data,int dim, size_t max_elements,int top_k,int num_threads){
     //init_onednn();
     std::vector<hnswlib::labeltype> neighbors(max_elements);
     ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
@@ -384,16 +451,16 @@ int call_AMX_bf16(hnswlib::HierarchicalNSW<float>* alg_hnsw,Bf16InnerProductSpac
 int main() {
     int true_dim=1024;
     int dim = true_dim/2;               // Dimension of the elements
-    int max_elements = 100*1024;   // Maximum number of elements, should be known beforehand
+    size_t max_elements = 10000*1024;   // Maximum number of elements, should be known beforehand
     int M = 16;                 // Tightly connected with internal dimensionality of the data
-    int nq = max_elements;
+    size_t nq = 100000;
                                 // strongly affects the memory consumption
     int ef_construction = 200;  // Controls index search speed/build speed tradeoff
     int num_threads = 16;       // Number of threads for operations with index
 
     int top_k=1;
 
-    int iteration=10;
+    int iteration=1000;
     float correct = 0;
 
     // Generate random data
@@ -401,6 +468,7 @@ int main() {
     rng.seed(47);
     std::uniform_real_distribution<> distrib_real(0,1);
     float* data_fp32 = (float* )aligned_alloc(64,true_dim * max_elements*sizeof(float));
+    float* query_fp32 = (float* )aligned_alloc(64,true_dim * nq*sizeof(float));
     float* data_bf16 = (float* )aligned_alloc(64,dim * max_elements*sizeof(float));
 
     const char* amx_bf16_env = std::getenv("BF16_AMX");
@@ -418,27 +486,28 @@ int main() {
 
 
     uint16_t *bf_data = (uint16_t* ) data_bf16;
-    for (int i = 0; i < true_dim * max_elements; i++) {
+    for (size_t i = 0; i < true_dim * max_elements; i++) {
         float tmp =  (distrib_real(rng));
         data_fp32[i] = tmp;
-        uint32_t *int32_data =(uint32_t *) &tmp;
-        bf_data[i]=*int32_data >> 16;
+        query_fp32[i] = (distrib_real(rng));
+/*         uint32_t *int32_data =(uint32_t *) &tmp;
+        bf_data[i]=*int32_data >> 16; */
     }
 
     hnswlib::InnerProductSpace space_fp32(true_dim);
     hnswlib::HierarchicalNSW<float>* alg_hnsw_fp32 = new hnswlib::HierarchicalNSW<float>(&space_fp32, max_elements, M, ef_construction);
     // Add data to index
-    ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
+    ParallelFor_Build(0, max_elements, 112, [&](size_t row, size_t threadId) {
         alg_hnsw_fp32->addPoint((void*)(data_fp32 + true_dim * row), row);
     });
 
     // Query the elements for themselves and measure recall
 
-    Bf16InnerProductSpace space_bf16(dim);
+/*     Bf16InnerProductSpace space_bf16(dim);
     hnswlib::HierarchicalNSW<float>* alg_hnsw_bf16 = new hnswlib::HierarchicalNSW<float>(&space_bf16, max_elements, M, ef_construction);
     ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
         alg_hnsw_bf16->addPoint((void*)(data_bf16 + dim * row), row);
-    });
+    }); */
 
 
 
@@ -450,14 +519,14 @@ int main() {
         std::cout << "Default FP32 search start." <<"\n";
         start_scalar_fp32 = std::chrono::high_resolution_clock::now();
         for(int i=0;i<iteration;i++){
-          call_scalar_fp32(alg_hnsw_fp32,space_fp32,data_fp32,true_dim,nq,top_k,num_threads);
+          call_scalar_fp32(alg_hnsw_fp32,space_fp32,query_fp32,true_dim,nq,top_k,num_threads);
         }
         end_scalar_fp32 = std::chrono::high_resolution_clock::now();
         std::cout << "Default FP32 search end." <<"\n-----------------------------------------------\n\n";
     }
 
 
-    if(avx512_enable_bf16){
+/*     if(avx512_enable_bf16){
         std::cout << "BF16 with AVX512 search start." <<"\n";
         start_scalar_bf16 = std::chrono::high_resolution_clock::now();
         for(int i=0;i<iteration;i++){
@@ -465,7 +534,7 @@ int main() {
         }
         end_scalar_bf16 = std::chrono::high_resolution_clock::now();
         std::cout << "BF16 with AVX512 search end." <<"\n-----------------------------------------------\n\n";
-    }
+    } */
 
 
     if(amx_enable_fp32){
@@ -479,7 +548,7 @@ int main() {
     }
 
 
-    if(amx_enable_bf16){
+/*     if(amx_enable_bf16){
       std::cout << "BF16 with AMX search start." <<"\n";
       start_AMX_bf16 = std::chrono::high_resolution_clock::now();
       for(int i=0;i<iteration;i++){
@@ -487,18 +556,18 @@ int main() {
       }
       end_AMX_bf16 = std::chrono::high_resolution_clock::now();
       std::cout << "BF16 with AVX512 search end." <<"\n-----------------------------------------------\n\n";
-    }
+    } */
   
-    std::chrono::duration<double> duration_scalar_fp32 = end_scalar_fp32 - start_scalar_fp32;
-    std::chrono::duration<double> duration_scalar_bf16 = end_scalar_bf16 - start_scalar_bf16;
-    std::chrono::duration<double> duration_AMX_fp32 = end_AMX_fp32 - start_AMX_fp32;
-    std::chrono::duration<double> duration_AMX_bf16 = end_AMX_bf16 - start_AMX_bf16;
+    std::chrono::duration<double,std::milli> duration_scalar_fp32 = end_scalar_fp32 - start_scalar_fp32;
+    std::chrono::duration<double,std::milli> duration_scalar_bf16 = end_scalar_bf16 - start_scalar_bf16;
+    std::chrono::duration<double,std::milli> duration_AMX_fp32 = end_AMX_fp32 - start_AMX_fp32;
+    std::chrono::duration<double,std::milli> duration_AMX_bf16 = end_AMX_bf16 - start_AMX_bf16;
 
 
-    if(def_enable_fp32) std::cout << "Time taken for default fp32:" << duration_scalar_fp32.count()/iteration<<std::endl;
-    if(avx512_enable_bf16) std::cout << "Time taken for bf16 with AVX512:" << duration_scalar_bf16.count()/iteration<<std::endl;
-    if(amx_enable_fp32) std::cout << "Time taken for fp32 with AMX:" << duration_AMX_fp32.count()/iteration<<std::endl;
-    if(amx_enable_bf16) std::cout << "Time taken for bf16 with AMX:" << duration_AMX_bf16.count()/iteration<<std::endl;
+    if(def_enable_fp32) std::cout << "Time taken for default fp32:" << duration_scalar_fp32.count()/iteration/nq<<std::endl;
+    if(avx512_enable_bf16) std::cout << "Time taken for bf16 with AVX512:" << duration_scalar_bf16.count()/iteration/nq<<std::endl;
+    if(amx_enable_fp32) std::cout << "Time taken for fp32 with AMX:" << duration_AMX_fp32.count()/iteration/nq<<std::endl;
+    if(amx_enable_bf16) std::cout << "Time taken for bf16 with AMX:" << duration_AMX_bf16.count()/iteration/nq<<std::endl;
     fflush(stdout);
 
 /*     delete[] data;
